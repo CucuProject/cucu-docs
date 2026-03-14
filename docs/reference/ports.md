@@ -11,9 +11,10 @@ This document lists all port assignments for services and databases in the Cucu 
 | **users** | 3002 | User Management |
 | **projects** | 3003 | Project Management |
 | **milestones** | 3004 | Milestone Management |
+| **milestone-to-user** | 3005 | User ↔ Milestone Relations |
+| **milestone-to-project** | 3006 | Project ↔ Milestone Relations |
 | **group-assignments** | 3007 | User ↔ Group Relations |
-| **milestone-to-user** | 3008 | User ↔ Milestone Relations |
-| **milestone-to-project** | 3009 | Project ↔ Milestone Relations |
+| **project-access** | 3008 | Project Access Control |
 | **grants** | 3010 | Permissions & Groups |
 | **organization** | 3012 | Lookup Tables |
 | **bootstrap** | 3100 | Seed Data (one-time) |

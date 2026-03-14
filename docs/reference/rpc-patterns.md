@@ -9,6 +9,12 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 | **MessagePattern** | Request-Response | Returns value |
 | **EventPattern** | Fire-and-Forget | No response |
 
+## Gateway Service
+
+| Pattern | Type | Payload | Response |
+|---------|------|---------|----------|
+| `INTROSPECT_GATEWAY` | Message | `void` | `{ success: boolean, data: IntrospectionData }` |
+
 ## Auth Service
 
 | Pattern | Type | Payload | Response |
@@ -49,7 +55,7 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 | `UPSERT_PAGE_PERMISSION` | Message | `CreatePagePermissionInput` | `PagePermission` |
 | `FIND_OP_PERMISSIONS_BY_GROUP` | Message | `{ groupId }` | `OperationPermission[]` |
 | `FIND_PERMISSIONS_BY_GROUP` | Message | `{ groupId, entityName? }` | `Permission[]` |
-| `FIND_BULK_PERMISSIONS_MULTI` | Message | `{ groupIds }` | `BulkPermissionsDTO` |
+| `FIND_BULK_PERMISSIONS_MULTI` | Message | `{ groupIds, entityNames }` | `BulkPermissionsDTO` |
 | `FIND_PAGE_PERMISSIONS_BY_GROUP` | Message | `{ groupId }` | `PagePermission[]` |
 
 ## GroupAssignments Service
@@ -64,60 +70,110 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 | `GROUP_CREATED` | Event | `{ groupId, userIds? }` | N/A |
 | `GROUP_UPDATED` | Event | `{ groupId, userIds? }` | N/A |
 | `GROUP_DELETED` | Event | `{ groupId }` | N/A |
-
-## MilestoneToUser Service
-
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `FIND_MILESTONE_TO_USER_BY_USER_ID` | Message | `userId: string` | `{ _id: string }[]` |
-| `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | Message | `milestoneId: string` | `{ _id: string }[]` |
-| `USER_CREATED` | Event | `{ userId, milestoneIds? }` | N/A |
-| `USER_UPDATED` | Event | `{ userId, milestoneIds? }` | N/A |
-| `USER_DELETED` | Event | `{ userId }` | N/A |
-| `MILESTONE_CREATED` | Event | `{ milestoneId, userIds? }` | N/A |
-| `MILESTONE_UPDATED` | Event | `{ milestoneId, userIds? }` | N/A |
-| `MILESTONE_DELETED` | Event | `{ milestoneId }` | N/A |
-
-## MilestoneToProject Service
-
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `FIND_MILESTONE_TO_PROJECT_BY_PROJECT_ID` | Message | `projectId: string` | `{ _id: string }[]` |
-| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` | Message | `milestoneId: string` | `{ _id: string }[]` |
-| `PROJECT_CREATED` | Event | `{ projectId, milestoneIds? }` | N/A |
-| `PROJECT_UPDATED` | Event | `{ projectId, milestoneIds? }` | N/A |
-| `PROJECT_DELETED` | Event | `{ projectId }` | N/A |
-| `MILESTONE_CREATED` | Event | `{ milestoneId, projectIds? }` | N/A |
-| `MILESTONE_DELETED` | Event | `{ milestoneId }` | N/A |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
 
 ## Organization Service
 
 | Pattern | Type | Payload | Response |
 |---------|------|---------|----------|
-| `FIND_SENIORITY_LEVELS_BY_IDS` | Message | `ids: string[]` | `SeniorityLevel[]` |
+| `JOB_ROLE_EXISTS` | Message | `id: string` | `boolean` |
 | `FIND_JOB_ROLES_BY_IDS` | Message | `ids: string[]` | `JobRole[]` |
+| `FIND_SENIORITY_LEVELS_BY_IDS` | Message | `ids: string[]` | `SeniorityLevel[]` |
 | `FIND_COMPANIES_BY_IDS` | Message | `ids: string[]` | `Company[]` |
 | `FIND_ROLE_CATEGORIES_BY_IDS` | Message | `ids: string[]` | `RoleCategory[]` |
+| `CREATE_SENIORITY_LEVEL` | Message | `{ name, order, description? }` | `SeniorityLevel` |
+| `FIND_SENIORITY_LEVEL_BY_NAME` | Message | `name: string` | `SeniorityLevel` or `null` |
+| `CREATE_JOB_ROLE` | Message | `{ name, order, description? }` | `JobRole` |
+| `FIND_JOB_ROLE_BY_NAME` | Message | `name: string` | `JobRole` or `null` |
+| `CREATE_ROLE_CATEGORY` | Message | `{ name, description? }` | `RoleCategory` |
+| `FIND_ROLE_CATEGORY_BY_NAME` | Message | `name: string` | `RoleCategory` or `null` |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
 
 ## Projects Service
 
 | Pattern | Type | Payload | Response |
 |---------|------|---------|----------|
 | `PROJECT_EXISTS` | Message | `projectId: string` | `boolean` |
+| `GET_PROJECT_DATES` | Message | `projectId: string` | `{ startDate, endDate }` |
+| `FIND_PROJECT_BY_NAME` | Message | `name: string` | `Project` or `null` |
+| `CREATE_PROJECT` | Message | `{ projectBasicData, assignedMilestoneIds? }` | `Project` |
+| `CREATE_PROJECT_TEMPLATE` | Message | `{ name, description?, scope, createdBy? }` | `ProjectTemplate` |
+| `FIND_PROJECT_TEMPLATE_BY_NAME` | Message | `name: string` | `ProjectTemplate` or `null` |
+| `FIND_TEMPLATE_PHASES_BY_TEMPLATE_ID` | Message | `templateId: string` | `ProjectTemplatePhase[]` |
+| `CREATE_PROJECT_TEMPLATE_PHASE` | Message | `{ templateId, name, orderIndex, isRequired, percentage?, roleCategoryId? }` | `ProjectTemplatePhase` |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
 
 ## Milestones Service
 
 | Pattern | Type | Payload | Response |
 |---------|------|---------|----------|
 | `MILESTONE_EXISTS` | Message | `milestoneId: string` | `boolean` |
+| `FIND_MILESTONE_BY_NAME` | Message | `{ name: string }` | `Milestone` or `null` |
+| `GET_MILESTONE_DATES` | Message | `milestoneId: string` | `{ startDate, endDate }` |
+| `CREATE_MILESTONE` | Message | `CreateMilestoneInput` | `Milestone` |
+| `UPDATE_MILESTONE` | Message | `UpdateMilestoneInput` | `Milestone` |
+| `UPDATE_MILESTONE_STATUS` | Message | `{ milestoneId, status }` | `Milestone` |
+| `DELETE_MILESTONE` | Message | `milestoneId: string` | `Milestone` |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
+
+## MilestoneToUser Service
+
+| Pattern | Type | Payload | Response |
+|---------|------|---------|----------|
+| `FIND_MILESTONE_TO_USER_BY_USER_ID` | Message | `userId: string` | `MilestoneToUser[]` |
+| `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | Message | `milestoneId: string` | `MilestoneToUser[]` |
+| `USER_CREATED` | Event | `{ userId, assignedMilestoneIds?, assignmentStartDates?, assignmentEndDates? }` | N/A |
+| `USER_UPDATED` | Event | `{ userId, assignedMilestoneIds?, assignmentStartDates?, assignmentEndDates? }` | N/A |
+| `USER_DELETED` | Event | `{ userId }` | N/A |
+| `USER_HARD_DELETED` | Event | `{ userId }` | N/A |
+| `MILESTONE_CREATED` | Event | `{ milestoneId, assignedUserIds?, assignmentStartDates?, assignmentEndDates? }` | N/A |
+| `MILESTONE_UPDATED` | Event | `{ milestoneId, assignedUserIds?, assignmentStartDates?, assignmentEndDates? }` | N/A |
+| `MILESTONE_DELETED` | Event | `{ milestoneId }` | N/A |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
+
+## MilestoneToProject Service
+
+| Pattern | Type | Payload | Response |
+|---------|------|---------|----------|
+| `FIND_MILESTONE_TO_PROJECT_BY_PROJECT_ID` | Message | `projectId: string` | `MilestoneToProject[]` |
+| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` | Message | `milestoneId: string` | `MilestoneToProject[]` |
+| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_IDS` | Message | `milestoneIds: string[]` | `MilestoneToProject[]` |
+| `CREATE_MILESTONE_TO_PROJECT` | Message | `{ milestoneId, projectId, startDate?, endDate? }` | `MilestoneToProject` |
+| `PROJECT_CREATED` | Event | `{ projectId, assignedMilestoneIds }` | N/A |
+| `PROJECT_UPDATED` | Event | `{ projectId, assignedMilestoneIds }` | N/A |
+| `PROJECT_DELETED` | Event | `{ projectId }` | N/A |
+| `MILESTONE_CREATED` | Event | `{ milestoneId, assignedProjectIds, assignmentStartDates?, assignmentEndDates? }` | N/A |
+| `MILESTONE_UPDATED` | Event | `{ milestoneId, assignedProjectIds, assignmentStartDates?, assignmentEndDates? }` | N/A |
+| `MILESTONE_DELETED` | Event | `{ milestoneId }` | N/A |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
+
+## ProjectAccess Service
+
+| Pattern | Type | Payload | Response |
+|---------|------|---------|----------|
+| `HAS_PROJECT_ACCESS` | Message | `{ userId, projectId }` | `boolean` |
+| `GET_ACCESSIBLE_PROJECT_IDS` | Message | `userId: string` | `string[]` |
+| `PROJECT_ACCESS_EXISTS` | Message | `id: string` | `boolean` |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
 
 ## Global Events
 
-These events are broadcast to all services:
+These events are broadcast to all services that need to invalidate permission caches:
 
 | Event | Payload | Purpose |
 |-------|---------|---------|
 | `PERMISSIONS_CHANGED` | `{ groupIds: string[] }` | Invalidate permission cache |
+
+**Services listening to PERMISSIONS_CHANGED:**
+- Users
+- Grants
+- GroupAssignments
+- Organization
+- Projects
+- Milestones
+- MilestoneToUser
+- MilestoneToProject
+- ProjectAccess
 
 ## Payload Types
 
@@ -191,6 +247,38 @@ interface CreateOperationPermissionInput {
 }
 ```
 
+### CreateMilestoneInput
+
+```typescript
+interface CreateMilestoneInput {
+  milestoneBasicData: {
+    name: string;
+    description: string;
+    plannedStartDate: string;
+    plannedEndDate: string;
+    status: number;
+    effort?: number;
+  };
+  color?: string;
+  assignedUserIds?: string[];
+  assignmentStartDates?: string[];
+  assignmentEndDates?: string[];
+}
+```
+
+### UpdateMilestoneInput
+
+```typescript
+interface UpdateMilestoneInput {
+  _id: string;
+  milestoneBasicData?: Partial<MilestoneBasicData>;
+  color?: string;
+  assignedUserIds?: string[];
+  assignmentStartDates?: string[];
+  assignmentEndDates?: string[];
+}
+```
+
 ## Usage Examples
 
 ### Sending MessagePattern
@@ -223,4 +311,79 @@ const group = await lastValueFrom(
     _internalSecret: process.env.INTERNAL_HEADER_SECRET,
   })
 );
+```
+
+### Checking Project Access
+
+```typescript
+const hasAccess = await lastValueFrom(
+  this.projectAccessClient.send<boolean>('HAS_PROJECT_ACCESS', {
+    userId: 'user-123',
+    projectId: 'project-456',
+  })
+);
+
+if (!hasAccess) {
+  throw new ForbiddenException('No access to this project');
+}
+```
+
+### Getting Bulk Permissions
+
+```typescript
+const permissions = await lastValueFrom(
+  this.grantsClient.send<BulkPermissionsDTO>('FIND_BULK_PERMISSIONS_MULTI', {
+    groupIds: ['group-1', 'group-2'],
+    entityNames: ['User', 'Project', 'Milestone'],
+  })
+);
+```
+
+## Event Flow Diagrams
+
+### User Creation Flow
+
+```
+Users Service                GroupAssignments Service         MilestoneToUser Service
+     │                              │                                │
+     │  emit('USER_CREATED',        │                                │
+     │  { userId, groupIds,         │                                │
+     │    assignedMilestoneIds })   │                                │
+     │─────────────────────────────►│                                │
+     │                              │  Creates GroupAssignment       │
+     │                              │  records for each groupId      │
+     │                              │                                │
+     │──────────────────────────────┼───────────────────────────────►│
+     │                              │                                │
+     │                              │         Creates MilestoneToUser│
+     │                              │         records for each       │
+     │                              │         milestoneId            │
+```
+
+### Permission Change Flow
+
+```
+Grants Service          All Services (Users, Projects, etc.)
+     │                              │
+     │  emit('PERMISSIONS_CHANGED', │
+     │  { groupIds })               │
+     │─────────────────────────────►│
+     │                              │
+     │                              │  PermissionsCacheService
+     │                              │  .invalidateGroups(groupIds)
+     │                              │
+```
+
+### Project Creation Flow
+
+```
+Projects Service         MilestoneToProject Service
+     │                              │
+     │  emit('PROJECT_CREATED',     │
+     │  { projectId,                │
+     │    assignedMilestoneIds })   │
+     │─────────────────────────────►│
+     │                              │
+     │                              │  Creates MilestoneToProject
+     │                              │  records for each milestoneId
 ```

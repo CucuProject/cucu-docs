@@ -118,6 +118,10 @@ export default defineConfig({
     }
   },
 
+  ignoreDeadLinks: [
+    /^http:\/\/localhost/,
+  ],
+
   markdown: {
     lineNumbers: true,
     theme: {

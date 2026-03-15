@@ -6,8 +6,8 @@ The MilestoneToProject service manages **N:N relationships between Projects and 
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3006 |
-| **Database** | milestone-to-project-db (MongoDB, port 9006) |
+| **Port** | 3007 |
+| **Database** | milestone-to-project-db (MongoDB, port 9007) |
 | **Role** | Project ↔ Milestone relationships |
 | **Dependencies** | Projects, Milestones |
 
@@ -347,9 +347,9 @@ async milestone(@Parent() assignment: MilestoneToProject): Promise<Milestone | n
 ```ini
 # Service Config
 MILESTONE_TO_PROJECT_SERVICE_NAME=milestone-to-project
-MILESTONE_TO_PROJECT_SERVICE_PORT=3006
+MILESTONE_TO_PROJECT_SERVICE_PORT=3007
 MILESTONE_TO_PROJECT_DB_HOST=milestone-to-project-db
-MILESTONE_TO_PROJECT_DB_PORT=9006
+MILESTONE_TO_PROJECT_DB_PORT=9007
 
 # MongoDB
 MONGODB_URI=mongodb://milestone-to-project-db:27017/milestone-to-project

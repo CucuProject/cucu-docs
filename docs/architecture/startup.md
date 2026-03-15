@@ -167,7 +167,7 @@ async function bootstrap() {
   const orchestrator = app.get(MicroservicesOrchestratorService);
 
   const serviceName = configService.get('USERS_SERVICE_NAME', 'users');
-  const port = configService.get('USERS_SERVICE_PORT', 3002);
+  const port = configService.get('USERS_SERVICE_PORT', 3003);
 
   // 1. Wait for dependencies
   try {
@@ -342,13 +342,13 @@ spec:
       livenessProbe:
         httpGet:
           path: /health
-          port: 3002
+          port: 3003
         initialDelaySeconds: 10
         periodSeconds: 10
       readinessProbe:
         httpGet:
           path: /health/ready
-          port: 3002
+          port: 3003
         initialDelaySeconds: 5
         periodSeconds: 5
 ```

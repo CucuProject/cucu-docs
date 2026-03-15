@@ -48,6 +48,7 @@ export default defineConfig({
           items: [
             { text: 'Gateway', link: '/services/gateway' },
             { text: 'Auth', link: '/services/auth' },
+            { text: 'Tenants', link: '/services/tenants' },
             { text: 'Users', link: '/services/users' },
             { text: 'Grants', link: '/services/grants' },
             { text: 'Group Assignments', link: '/services/group-assignments' },
@@ -64,6 +65,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: 'Service Common', link: '/shared/service-common' },
+            { text: 'Tenant DB', link: '/shared/tenant-db' },
             { text: 'Field-Level Grants', link: '/shared/field-level-grants' },
             { text: 'Permission Rules', link: '/shared/permission-rules' },
           ]

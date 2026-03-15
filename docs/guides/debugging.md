@@ -479,7 +479,7 @@ redis-cli FLUSHALL
 ### Check Service Health
 
 ```bash
-for port in 3000 3001 3002 3003 3004 3010; do
+for port in 3000 3001 3002 3003 3004 3005 3011; do
   echo -n "Port $port: "
   curl -s "http://localhost:$port/" || echo "FAILED"
 done

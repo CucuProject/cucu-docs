@@ -30,8 +30,8 @@ GraphQLModule.forRootAsync<ApolloGatewayDriverConfig>({
   useFactory: async (configService: ConfigService) => {
     const subgraphs = [
       { name: 'auth', url: `http://auth:3001/graphql` },
-      { name: 'users', url: `http://users:3002/graphql` },
-      { name: 'grants', url: `http://grants:3010/graphql` },
+      { name: 'users', url: `http://users:3003/graphql` },
+      { name: 'grants', url: `http://grants:3011/graphql` },
       // ... other subgraphs
     ];
 
@@ -368,7 +368,7 @@ buildSchemaOptions: {
 ### Check Subgraph Schema
 
 ```bash
-curl http://localhost:3002/graphql -X POST \
+curl http://localhost:3003/graphql -X POST \
   -H "Content-Type: application/json" \
   -d '{"query": "{ _service { sdl } }"}'
 ```

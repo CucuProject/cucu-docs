@@ -6,8 +6,8 @@ The Grants service manages **groups, permissions, and access control** for the C
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3010 |
-| **Database** | grants-db (MongoDB, port 9010) |
+| **Port** | 3011 |
+| **Database** | grants-db (MongoDB, port 9011) |
 | **Role** | Permission management, group management |
 | **Dependencies** | None (core service) |
 
@@ -496,9 +496,9 @@ mutation {
 ```ini
 # Service Config
 GRANTS_SERVICE_NAME=grants
-GRANTS_SERVICE_PORT=3010
+GRANTS_SERVICE_PORT=3011
 GRANTS_DB_HOST=grants-db
-GRANTS_DB_PORT=9010
+GRANTS_DB_PORT=9011
 
 # MongoDB
 MONGODB_URI=mongodb://grants-db:27017/grants

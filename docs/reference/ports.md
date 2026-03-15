@@ -8,15 +8,16 @@ This document lists all port assignments for services and databases in the Cucu 
 |---------|-----------|---------|
 | **gateway** | 3000 | Apollo Federation Gateway |
 | **auth** | 3001 | Authentication & Sessions |
-| **users** | 3002 | User Management |
-| **projects** | 3003 | Project Management |
-| **milestones** | 3004 | Milestone Management |
-| **milestone-to-user** | 3005 | User ↔ Milestone Relations |
-| **milestone-to-project** | 3006 | Project ↔ Milestone Relations |
-| **group-assignments** | 3007 | User ↔ Group Relations |
-| **project-access** | 3008 | Project Access Control |
-| **grants** | 3010 | Permissions & Groups |
-| **organization** | 3012 | Lookup Tables |
+| **tenants** | 3002 | Tenant Registry & Platform DB |
+| **users** | 3003 | User Management |
+| **projects** | 3004 | Project Management |
+| **milestones** | 3005 | Milestone Management |
+| **milestone-to-user** | 3006 | User ↔ Milestone Relations |
+| **milestone-to-project** | 3007 | Project ↔ Milestone Relations |
+| **group-assignments** | 3008 | User ↔ Group Relations |
+| **project-access** | 3009 | Project Access Control |
+| **grants** | 3011 | Permissions & Groups |
+| **organization** | 3012 | Company, JobRole, SeniorityLevel, RoleCategory |
 | **bootstrap** | 3100 | Seed Data (one-time) |
 
 ## Database Ports
@@ -24,14 +25,15 @@ This document lists all port assignments for services and databases in the Cucu 
 | Service | DB Port | Database Name |
 |---------|---------|---------------|
 | **auth** | 9001 | auth |
-| **users** | 9002 | users |
-| **projects** | 9003 | projects |
-| **milestones** | 9004 | milestones |
-| **milestone-to-user** | 9005 | milestone-to-user |
-| **milestone-to-project** | 9006 | milestone-to-project |
-| **group-assignments** | 9007 | group-assignments |
-| **project-access** | 9008 | project-access |
-| **grants** | 9010 | grants |
+| **tenants** | 9002 | tenants (Platform DB) |
+| **users** | 9003 | users |
+| **projects** | 9004 | projects |
+| **milestones** | 9005 | milestones |
+| **milestone-to-user** | 9006 | milestone-to-user |
+| **milestone-to-project** | 9007 | milestone-to-project |
+| **group-assignments** | 9008 | group-assignments |
+| **project-access** | 9009 | project-access |
+| **grants** | 9011 | grants |
 | **organization** | 9012 | organization |
 
 ## Redis Ports
@@ -53,7 +55,9 @@ This document lists all port assignments for services and databases in the Cucu 
 # Examples
 GATEWAY_SERVICE_PORT=3000
 AUTH_SERVICE_PORT=3001
+TENANTS_SERVICE_PORT=3002
 AUTH_DB_PORT=9001
+TENANTS_DB_PORT=9002
 ```
 
 ## Port Diagram
@@ -73,10 +77,10 @@ AUTH_DB_PORT=9001
     │                     │                     │
     ▼                     ▼                     ▼
 ┌────────┐          ┌────────┐           ┌────────┐
-│:3001   │          │:3002   │           │:3010   │
-│ Auth   │          │ Users  │           │ Grants │
+│:3001   │          │:3002   │           │:3011   │
+│ Auth   │          │Tenants │           │ Grants │
 │        │          │        │           │        │
-│ DB:9001│          │ DB:9002│           │ DB:9010│
+│ DB:9001│          │ DB:9002│           │ DB:9011│
 └────────┘          └────────┘           └────────┘
     │                     │                     │
     └─────────────────────┼─────────────────────┘
@@ -97,11 +101,14 @@ MONGODB_URI=mongodb://<service>-db:<db-port>/<database>
 # Auth
 MONGODB_URI=mongodb://auth-db:9001/auth
 
+# Tenants (Platform DB)
+MONGODB_URI=mongodb://tenants-db:9002/tenants
+
 # Users
-MONGODB_URI=mongodb://users-db:9002/users
+MONGODB_URI=mongodb://users-db:9003/users
 
 # Grants
-MONGODB_URI=mongodb://grants-db:9010/grants
+MONGODB_URI=mongodb://grants-db:9011/grants
 ```
 
 ## Docker Network
@@ -119,6 +126,12 @@ services:
       - "3001"       # Internal only
     ports:
       - "3001:3001"  # For development
+
+  tenants:
+    expose:
+      - "3002"       # Internal only
+    ports:
+      - "3002:3002"  # For development
 ```
 
 ## Development vs Production
@@ -135,6 +148,12 @@ services:
   auth-db:
     ports:
       - "9001:27017"
+  tenants:
+    ports:
+      - "3002:3002"
+  tenants-db:
+    ports:
+      - "9002:27017"
 ```
 
 ### Production
@@ -151,13 +170,26 @@ services:
     expose:
       - "3001"
     # No ports mapping
+  
+  tenants:
+    expose:
+      - "3002"
+    # No ports mapping
 ```
 
 ## Adding a New Service
 
 When adding a new service, assign the next available ports:
 
-1. Service port: Next after 3012 (e.g., 3013, 3014, ...)
-2. Database port: Next after 9012 (e.g., 9013, 9014, ...)
+1. Service port: Next available after 3012 (e.g., 3010 is free, then 3013, 3014, ...)
+2. Database port: Next available after 9012 (e.g., 9010 is free, then 9013, 9014, ...)
+
+::: tip Currently available service ports
+`3010` is currently free. After that: `3013`, `3014`, ...
+:::
+
+::: tip Currently available DB ports
+`9010` is currently free. After that: `9013`, `9014`, ...
+:::
 
 Update this document with the new assignments.

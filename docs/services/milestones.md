@@ -6,8 +6,8 @@ The Milestones service manages **milestone entities** and **milestone dependenci
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3004 |
-| **Database** | milestones-db (MongoDB, port 9004) |
+| **Port** | 3005 |
+| **Database** | milestones-db (MongoDB, port 9005) |
 | **Role** | Milestone CRUD, status tracking, dependencies |
 | **Dependencies** | MilestoneToUser, MilestoneToProject |
 
@@ -387,9 +387,9 @@ async projects(@Parent() m: Milestone) {
 ```ini
 # Service Config
 MILESTONES_SERVICE_NAME=milestones
-MILESTONES_SERVICE_PORT=3004
+MILESTONES_SERVICE_PORT=3005
 MILESTONES_DB_HOST=milestones-db
-MILESTONES_DB_PORT=9004
+MILESTONES_DB_PORT=9005
 
 # MongoDB
 MONGODB_URI=mongodb://milestones-db:27017/milestones

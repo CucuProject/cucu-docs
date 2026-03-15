@@ -23,7 +23,7 @@ This document provides a high-level view of the Cucu platform architecture.
             │                        │                        │
             ▼                        ▼                        ▼
     ┌───────────────┐       ┌───────────────┐        ┌───────────────┐
-    │ Auth (:3001)  │       │ Users (:3002) │        │ Grants(:3010) │
+    │ Auth (:3001)  │       │ Users (:3003) │        │ Grants(:3011) │
     │ ┌───────────┐ │       │ ┌───────────┐ │        │ ┌───────────┐ │
     │ │  MongoDB  │ │       │ │  MongoDB  │ │        │ │  MongoDB  │ │
     │ └───────────┘ │       │ └───────────┘ │        │ └───────────┘ │
@@ -87,12 +87,12 @@ Each service owns its data and database:
 │  Service                Database              Collections    │
 ├─────────────────────────────────────────────────────────────┤
 │  Auth (:3001)          auth-db (:9001)       sessions       │
-│  Users (:3002)         users-db (:9002)      users          │
-│  Grants (:3010)        grants-db (:9010)     groups,        │
+│  Users (:3003)         users-db (:9003)      users          │
+│  Grants (:3011)        grants-db (:9011)     groups,        │
 │                                              permissions,    │
 │                                              operationPerms  │
-│  Projects (:3003)      projects-db (:9003)   projects       │
-│  Milestones (:3004)    milestones-db(:9004)  milestones     │
+│  Projects (:3004)      projects-db (:9004)   projects       │
+│  Milestones (:3005)    milestones-db(:9005)  milestones     │
 └─────────────────────────────────────────────────────────────┘
 ```
 

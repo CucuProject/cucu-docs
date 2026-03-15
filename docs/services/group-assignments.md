@@ -6,8 +6,8 @@ The GroupAssignments service manages **N:N relationships between Users and Group
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3007 |
-| **Database** | group-assignments-db (MongoDB, port 9007) |
+| **Port** | 3008 |
+| **Database** | group-assignments-db (MongoDB, port 9008) |
 | **Role** | User ↔ Group relationship management |
 | **Dependencies** | Users, Grants |
 
@@ -343,9 +343,9 @@ group(@Parent() assignment: GroupAssignment): Group {
 ```ini
 # Service Config
 GROUP_ASSIGNMENTS_SERVICE_NAME=group-assignments
-GROUP_ASSIGNMENTS_SERVICE_PORT=3007
+GROUP_ASSIGNMENTS_SERVICE_PORT=3008
 GROUP_ASSIGNMENTS_DB_HOST=group-assignments-db
-GROUP_ASSIGNMENTS_DB_PORT=9007
+GROUP_ASSIGNMENTS_DB_PORT=9008
 
 # MongoDB
 MONGODB_URI=mongodb://group-assignments-db:27017/group-assignments

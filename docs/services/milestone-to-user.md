@@ -6,8 +6,8 @@ The MilestoneToUser service manages **N:N relationships between Users and Milest
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3005 |
-| **Database** | milestone-to-user-db (MongoDB, port 9005) |
+| **Port** | 3006 |
+| **Database** | milestone-to-user-db (MongoDB, port 9006) |
 | **Role** | User ↔ Milestone relationships, daily allocations |
 | **Dependencies** | Users, Milestones |
 
@@ -464,9 +464,9 @@ Each assignment can override the milestone's default dates:
 ```ini
 # Service Config
 MILESTONE_TO_USER_SERVICE_NAME=milestone-to-user
-MILESTONE_TO_USER_SERVICE_PORT=3005
+MILESTONE_TO_USER_SERVICE_PORT=3006
 MILESTONE_TO_USER_DB_HOST=milestone-to-user-db
-MILESTONE_TO_USER_DB_PORT=9005
+MILESTONE_TO_USER_DB_PORT=9006
 
 # MongoDB
 MONGODB_URI=mongodb://milestone-to-user-db:27017/milestone-to-user

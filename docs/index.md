@@ -50,7 +50,7 @@ features:
         │                      │                       │
         ▼                      ▼                       ▼
 ┌───────────────┐    ┌─────────────────┐    ┌──────────────────┐
-│  Auth (3001)  │    │  Users (3002)   │    │  Grants (3010)   │
+│  Auth (3001)  │    │  Users (3003)   │    │  Grants (3011)   │
 │   Sessions    │    │   User CRUD     │    │   Permissions    │
 │   JWT/Refresh │    │   Profiles      │    │   Groups         │
 └───────────────┘    └─────────────────┘    └──────────────────┘

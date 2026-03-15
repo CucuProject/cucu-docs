@@ -6,8 +6,8 @@ The Users service manages **user profiles, authentication data, and organization
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3002 |
-| **Database** | users-db (MongoDB, port 9002) |
+| **Port** | 3003 |
+| **Database** | users-db (MongoDB, port 9003) |
 | **Role** | User CRUD, profiles, lookup tables |
 | **Dependencies** | Grants |
 
@@ -366,9 +366,9 @@ async groupIds(@Parent() auth: AuthDataSchema): Promise<string[]> {
 ```ini
 # Service Config
 USERS_SERVICE_NAME=users
-USERS_SERVICE_PORT=3002
+USERS_SERVICE_PORT=3003
 USERS_DB_HOST=users-db
-USERS_DB_PORT=9002
+USERS_DB_PORT=9003
 
 # MongoDB
 MONGODB_URI=mongodb://users-db:27017/users

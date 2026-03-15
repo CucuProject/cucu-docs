@@ -6,8 +6,8 @@ The ProjectAccess service manages **per-project access control** in the Cucu pla
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3008 |
-| **Database** | project-access-db (MongoDB, port 9008) |
+| **Port** | 3009 |
+| **Database** | project-access-db (MongoDB, port 9009) |
 | **Role** | Per-project role-based access control |
 | **Dependencies** | Users, Projects |
 
@@ -282,9 +282,9 @@ async user(@Parent() projectAccess: ProjectAccess) {
 ```ini
 # Service Config
 PROJECT_ACCESS_SERVICE_NAME=project-access
-PROJECT_ACCESS_SERVICE_PORT=3008
+PROJECT_ACCESS_SERVICE_PORT=3009
 PROJECT_ACCESS_DB_HOST=project-access-db
-PROJECT_ACCESS_DB_PORT=9008
+PROJECT_ACCESS_DB_PORT=9009
 
 # MongoDB
 MONGODB_URI=mongodb://project-access-db:27017/project-access

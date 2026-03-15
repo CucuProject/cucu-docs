@@ -39,6 +39,8 @@ interface ISubgraphContext {
   isInternalCall(): boolean;
   hasUserContext(): boolean;
   currentUserId(): string | undefined;
+  tenantSlug(): string | undefined;
+  tenantId(): string | undefined;
 }
 ```
 
@@ -72,11 +74,36 @@ export class BaseSubgraphContext implements ISubgraphContext {
     return this.getHeaders()['x-user-id'];
   }
 
+  tenantSlug(): string | undefined {
+    // Extracts the tenant slug from the x-tenant-slug header (HTTP)
+    // or from the _tenantSlug field in the RPC payload.
+    if (!this.verifyHeaders()) return undefined;
+    return this.getHeaders()['x-tenant-slug'] ?? this.getRpcPayload()?._tenantSlug;
+  }
+
+  tenantId(): string | undefined {
+    // Extracts the tenant ID from the x-tenant-id header (HTTP)
+    // or from the _tenantId field in the RPC payload.
+    if (!this.verifyHeaders()) return undefined;
+    return this.getHeaders()['x-tenant-id'] ?? this.getRpcPayload()?._tenantId;
+  }
+
   private verifyHeaders(): boolean {
     return verifyGatewaySignature(this.getHeaders());
   }
 }
 ```
+
+#### Tenant Context Methods
+
+| Method | Source (HTTP) | Source (RPC) | Description |
+|--------|--------------|-------------|-------------|
+| `tenantSlug()` | `x-tenant-slug` header | `_tenantSlug` payload field | Tenant URL-safe slug (e.g., `"acme-corp"`) |
+| `tenantId()` | `x-tenant-id` header | `_tenantId` payload field | Tenant MongoDB ObjectId as string |
+
+These methods return `undefined` when:
+- The request lacks a valid gateway signature (not a forwarded request)
+- The tenant headers/fields are not present (e.g., platform-level operations)
 
 ## Guards
 

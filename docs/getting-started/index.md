@@ -40,7 +40,7 @@ Before you begin, ensure you have the following installed:
         ┌────────────────────┼────────────────────┐
         ▼                    ▼                    ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│ Auth (:3001) │    │ Users (:3002)│    │ Grants(:3010)│
+│ Auth (:3001) │    │ Users (:3003)│    │ Grants(:3011)│
 │   MongoDB    │    │   MongoDB    │    │   MongoDB    │
 └──────────────┘    └──────────────┘    └──────────────┘
 ```

@@ -6,8 +6,8 @@ The Projects service manages **project entities** and **project templates** in t
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3003 |
-| **Database** | projects-db (MongoDB, port 9003) |
+| **Port** | 3004 |
+| **Database** | projects-db (MongoDB, port 9004) |
 | **Role** | Project CRUD, templates, holiday calendars |
 | **Dependencies** | MilestoneToProject |
 
@@ -445,9 +445,9 @@ async milestones(@Parent() project: Project): Promise<MilestoneToProject[]> {
 ```ini
 # Service Config
 PROJECTS_SERVICE_NAME=projects
-PROJECTS_SERVICE_PORT=3003
+PROJECTS_SERVICE_PORT=3004
 PROJECTS_DB_HOST=projects-db
-PROJECTS_DB_PORT=9003
+PROJECTS_DB_PORT=9004
 
 # MongoDB
 MONGODB_URI=mongodb://projects-db:27017/projects

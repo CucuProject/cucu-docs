@@ -1,327 +1,640 @@
-# Permission Rules
+# @cucu/permission-rules
 
-This document describes the permission rules, invariants, and best practices for the Cucu permission system.
+> The single source of truth for the entire Cucu permission model. Zero framework dependencies — shared between backend (NestJS) and frontend (Next.js). Defines operations, fields, invariants, cascades, pages, field groups, and UI constraints.
 
-## Permission Hierarchy
+## Architecture Overview
 
+```mermaid
+graph TB
+    subgraph "permission-rules (shared)"
+        Types["types.ts"]
+        Ops["operations.ts"]
+        Fields["fields.ts"]
+        Inv["invariants.ts"]
+        Casc["cascades.ts"]
+        Pages["pages.ts"]
+        OpAccess["operationAccess.ts"]
+        FG["fieldGroups.ts"]
+        UI["uiConstraints.ts"]
+    end
+
+    subgraph "Backend (grants service)"
+        GS["grants.service.ts"]
+    end
+
+    subgraph "Frontend (Next.js)"
+        Hook["usePermissionDependencies"]
+        PageGuard["PageGuard"]
+        PermUI["Permission Editor UI"]
+    end
+
+    GS --> Ops
+    GS --> Fields
+    GS --> Inv
+    GS --> Casc
+    GS --> OpAccess
+    GS --> FG
+
+    Hook --> Casc
+    Hook --> UI
+    PageGuard --> Pages
+    PermUI --> Ops
+    PermUI --> Fields
+    PermUI --> Inv
+    PermUI --> UI
+
+    style Types fill:#fff3e0
+    style Inv fill:#fce4ec
+    style Casc fill:#e1f5fe
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          PERMISSION EVALUATION                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Step 1: Is the operation allowed?                                          │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ OperationGuard checks OperationPermission                              │ │
-│  │ Query: findAllUsers → canExecute: true/false                          │ │
-│  │ If false → ForbiddenException                                          │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│  Step 2: What scope applies to this operation?                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ ScopeGuard checks operation scope                                      │ │
-│  │ scope: 'all' → proceed                                                 │ │
-│  │ scope: 'self' → targetId must match currentUserId                     │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│  Step 3: What fields can the user see?                                      │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ ViewFieldsInterceptor loads field permissions                         │ │
-│  │ Builds MongoDB projection from viewable fields                         │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│  Step 4: Apply field-level scope                                            │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ Service sanitizes response based on field scopes                       │ │
-│  │ scope: 'self' fields excluded when viewing other users                │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
 
-## Permission Invariants
+**Design principle:** This library has ZERO framework dependencies. It works identically in a NestJS service and a Next.js React component. All functions are pure — no side effects, no network calls, no mutations.
 
-### 1. No Permission = No Access
+## Module Index
 
-If no `OperationPermission` exists for an operation and user's groups, access is **denied**.
+| Module | Purpose |
+|--------|---------|
+| `types.ts` | All TypeScript types and interfaces |
+| `operations.ts` | Operation catalog (CRUD operations) |
+| `fields.ts` | Field catalog (entity field permissions) |
+| `invariants.ts` | Fundamental rules that are ALWAYS true |
+| `cascades.ts` | Cascade rules (automatic side-effects) |
+| `pages.ts` | Page definitions (route → required operations) |
+| `operationAccess.ts` | Protected operations and visibility rules |
+| `fieldGroups.ts` | Logically coupled fields that must stay in sync |
+| `uiConstraints.ts` | Pure functions for UI state derivation |
+
+---
+
+## Types
+
+**File:** `src/types.ts`
+
+### Core Types
 
 ```typescript
-// User in groups: ["VIEWER"]
-// No OperationPermission for "createUser" + "VIEWER"
-// Result: ForbiddenException("Operation 'createUser' not allowed")
+type ScopeValue = 'ALL' | 'SELF';
+type EffectiveScope = ScopeValue | 'BYPASSED';
+
+interface FieldPermissionState {
+  canView: boolean;
+  canEdit: boolean;
+  viewScope: ScopeValue;
+  editScope: ScopeValue;
+}
+
+interface EffectiveFieldPermission {
+  canView: boolean;
+  canEdit: boolean;
+  effectiveViewScope: EffectiveScope;  // BYPASSED when canView=false
+  effectiveEditScope: EffectiveScope;  // BYPASSED when canView=false OR canEdit=false
+}
+
+interface OperationPermissionState {
+  canExecute: boolean;
+  scope: ScopeValue;
+}
 ```
 
-### 2. Any Group Grants Access
-
-If a user belongs to multiple groups, they get the **union** of permissions.
+### Operation Definition
 
 ```typescript
-// User in groups: ["MANAGER", "VIEWER"]
+type OperationScopeMode =
+  | 'FIXED_ALL'    // always ALL, not configurable
+  | 'FIXED_SELF'   // always SELF, not configurable
+  | 'VARIABLE';    // admin can choose ALL or SELF
 
-// MANAGER: canView('employmentData.RAL') = true
-// VIEWER:  canView('employmentData.RAL') = false
-
-// Result: canView = true (MANAGER grants it)
+interface OperationDefinition {
+  name: string;
+  scopeMode: OperationScopeMode;
+  defaultScope: ScopeValue;
+  description: string;
+  entity: string;
+}
 ```
 
-### 3. Most Permissive Scope Wins
-
-When merging scopes across groups, the more permissive scope wins.
+### Field Definition
 
 ```typescript
-// MANAGER: scope for 'findOneUser' = 'all'
-// VIEWER:  scope for 'findOneUser' = 'self'
+type FieldSensitivity =
+  | 'PUBLIC'       // safe to show by default
+  | 'INTERNAL'     // internal use, hide from low-privilege groups
+  | 'SENSITIVE'    // sensitive data (e.g. email, location)
+  | 'RESTRICTED';  // highly sensitive (RAL, companyCosts, rates)
 
-// Result: scope = 'all' (more permissive)
+interface FieldDefinition {
+  entityName: string;
+  fieldPath: string;
+  label: string;
+  sensitivity: FieldSensitivity;
+  description: string;
+  readOnly?: boolean;           // canEdit always false
+  fixedViewScope?: ScopeValue;  // viewScope locked to this value
+  fixedEditScope?: ScopeValue;  // editScope locked to this value
+}
 ```
 
-### 4. Self Scope Requires ID Match
-
-Operations with `scope: 'self'` require the target ID to match the current user.
+### Cascade Rule Types
 
 ```typescript
-// Operation: findOneUser(userId)
-// scope: 'self'
-// currentUserId: "user-123"
-// targetUserId: "user-456"
+type OpTriggerEvent =
+  | 'enabled' | 'disabled'
+  | 'scope:ALL_TO_SELF' | 'scope:SELF_TO_ALL';
 
-// Result: ForbiddenException (IDs don't match)
+interface CascadeRule {
+  trigger: string;          // operation that triggers
+  on: OpTriggerEvent;       // event type
+  effects: PermEffect[];    // what happens
+  feedback?: CascadeFeedback;  // user notification
+}
+
+// Effect can target operations or fields:
+type PermEffect = OpPermEffect | FieldPermEffect;
 ```
 
-### 5. Field Scope Filters Response
-
-Fields with `scope: 'self'` are excluded when viewing another user's record.
+### Page Definition
 
 ```typescript
-// User viewing their own record:
+interface PageDefinition {
+  pageKey: string;
+  routePrefixes: string[];
+  requiredOperations: string[];
+}
+```
+
+### Snapshot Types (for UI constraints)
+
+```typescript
+interface OpPermSnapshot {
+  operationName: string;
+  canExecute: boolean;
+  operationScope: ScopeValue;
+}
+
+interface FieldPermSnapshot {
+  entityName: string;
+  fieldPath: string;
+  canView: boolean;
+  canEdit: boolean;
+  viewScope: ScopeValue;
+  editScope: ScopeValue;
+}
+```
+
+---
+
+## Operations Catalog
+
+**File:** `src/operations.ts`
+
+Defines every operation in the system. Each operation corresponds to a GraphQL query or mutation.
+
+### All Operations
+
+| Operation | Entity | Scope Mode | Default Scope | Description |
+|-----------|--------|------------|---------------|-------------|
+| `findAllUsers` | User | FIXED_ALL | ALL | Read list of all users (required for People page) |
+| `findDeletedUsers` | User | FIXED_ALL | ALL | Read soft-deleted users list |
+| `createUser` | User | FIXED_ALL | ALL | Create new user account |
+| `updateUser` | User | VARIABLE | ALL | Update user profile data |
+| `removeUser` | User | FIXED_ALL | ALL | Soft-delete user (recoverable) |
+| `restoreUser` | User | FIXED_ALL | ALL | Restore soft-deleted user |
+| `hardDeleteUser` | User | FIXED_ALL | ALL | Permanently delete user (irreversible) |
+| `changePassword` | Session | FIXED_SELF | SELF | Change own password only |
+| `findSessionsByUserId` | Session | VARIABLE | ALL | View user sessions |
+| `revokeSession` | Session | VARIABLE | ALL | Revoke a single session |
+| `revokeUserSessions` | Session | FIXED_ALL | ALL | Revoke all sessions for a user |
+
+### Lookup Functions
+
+```typescript
+// Data structures
+const OPERATION_DEFINITIONS: OperationDefinition[];
+const OPERATION_MAP: Map<string, OperationDefinition>;
+
+// Functions
+function getOperationDefinition(name: string): OperationDefinition | undefined;
+function isFixedScope(name: string): boolean;
+function getFixedScope(name: string): 'ALL' | 'SELF' | undefined;
+```
+
+---
+
+## Fields Catalog
+
+**File:** `src/fields.ts`
+
+Defines every field that can have permissions configured. Organized by entity and nested path.
+
+### User Fields
+
+| Field Path | Label | Sensitivity | Read-Only | Fixed Edit Scope |
+|------------|-------|-------------|-----------|------------------|
+| `authData.name` | First name | PUBLIC | — | — |
+| `authData.surname` | Last name | PUBLIC | — | — |
+| `authData.email` | Email | SENSITIVE | ✅ | — |
+| `authData.groupIds` | Assigned groups | INTERNAL | — | ALL |
+| `personalData.dateOfBirth` | Date of birth | SENSITIVE | — | ALL |
+| `personalData.placeOfBirth` | Place of birth | SENSITIVE | — | ALL |
+| `personalData.citizenship` | Citizenship | SENSITIVE | — | ALL |
+| `personalData.languages` | Languages | INTERNAL | — | ALL |
+| `employmentData.dateOfEmployment` | Employment date | INTERNAL | — | ALL |
+| `employmentData.endDate` | End date | INTERNAL | — | ALL |
+| `employmentData.location` | Location | INTERNAL | — | ALL |
+| `employmentData.RAL` | RAL (salary) | **RESTRICTED** | — | ALL |
+| `employmentData.companyCosts` | Company costs | **RESTRICTED** | — | ALL |
+| `employmentData.rates` | Billing rates | **RESTRICTED** | — | ALL |
+| `additionalFieldsData.active` | Active status | INTERNAL | — | ALL |
+| `additionalFieldsData.seniorityLevelId` | Seniority | INTERNAL | — | ALL |
+| `additionalFieldsData.jobRoleIds` | Job roles | INTERNAL | — | ALL |
+| `additionalFieldsData.companyId` | Company | INTERNAL | — | ALL |
+| `additionalFieldsData.supervisorIds` | Supervisors | INTERNAL | — | ALL |
+| `additionalFieldsData.billable` | Billable | INTERNAL | — | ALL |
+
+### Session Fields (all read-only)
+
+| Field Path | Label | Sensitivity |
+|------------|-------|-------------|
+| `ip` | IP address | INTERNAL |
+| `deviceName` | Device | INTERNAL |
+| `browserName` | Browser | INTERNAL |
+| `revokedAt` | Revoked at | INTERNAL |
+| `expiresAt` | Expires at | INTERNAL |
+| `sessionStart` | Session start | INTERNAL |
+| `lastActivity` | Last activity | INTERNAL |
+
+### Lookup Functions
+
+```typescript
+const FIELD_DEFINITIONS: FieldDefinition[];
+const FIELD_MAP: Map<string, FieldDefinition>;  // key: "Entity:fieldPath"
+
+function getFieldDefinition(entityName: string, fieldPath: string): FieldDefinition | undefined;
+function getFieldsForEntity(entityName: string): FieldDefinition[];
+function isReadOnlyField(entityName: string, fieldPath: string): boolean;
+function getFixedViewScope(entityName: string, fieldPath: string): 'ALL' | 'SELF' | undefined;
+function getFixedEditScope(entityName: string, fieldPath: string): 'ALL' | 'SELF' | undefined;
+```
+
+---
+
+## Invariants
+
+**File:** `src/invariants.ts`
+
+Fundamental rules that are **ALWAYS true**, regardless of any configuration. Both FE and BE must enforce these.
+
+### Field Invariants
+
+| # | Rule | Rationale |
+|---|------|-----------|
+| 1 | `canView=false` → `canEdit` must be `false` | Can't edit what you can't see |
+| 2 | `canView=false` → viewScope and editScope are `BYPASSED` | Scopes are meaningless without access |
+| 3 | `canView=true, canEdit=false` → editScope is `BYPASSED` | Edit scope irrelevant without edit |
+| 4 | `canEdit=true` → `canView` must be `true` | Editing implies viewing |
+| 5 | editScope cannot be broader than viewScope | Can't edit ALL if you only see SELF |
+| 7 | readOnly fields → `canEdit` always `false` | e.g., email can never be edited |
+| 8 | fixedViewScope fields → viewScope locked | Cannot be changed by admin |
+| 9 | fixedEditScope fields → editScope locked | Cannot be changed by admin |
+
+### Operation Invariants
+
+| # | Rule | Rationale |
+|---|------|-----------|
+| 6 | `updateUser.canExecute` can never be `false` | Required for core user management |
+
+### Cross-Operation Invariants
+
+| # | Rule | Rationale |
+|---|------|-----------|
+| 10 | `revokeSession.scope=SELF` → `findSessionsByUserId.scope` must be `SELF` | Can't list all sessions if can only revoke own |
+| 11 | `revokeSession.scope=SELF` → all Session field viewScopes must be `SELF` | Can't see other users' session data if limited to own sessions |
+
+### Scope Hierarchy Functions
+
+```typescript
+// ALL > SELF
+function isBroader(scopeA: string, scopeB: string): boolean;
+function broaderScope(a: string, b: string): string;
+```
+
+### Core Functions
+
+#### `applyFieldInvariants(state: FieldPermissionState): EffectiveFieldPermission`
+
+Returns the effective permission state after applying all invariants. **Use this everywhere** instead of reading raw values.
+
+```typescript
+// Example: canView=false makes everything BYPASSED
+applyFieldInvariants({ canView: false, canEdit: true, viewScope: 'ALL', editScope: 'SELF' });
+// → { canView: false, canEdit: false, effectiveViewScope: 'BYPASSED', effectiveEditScope: 'BYPASSED' }
+
+// Example: editScope cannot exceed viewScope — viewScope gets upgraded
+applyFieldInvariants({ canView: true, canEdit: true, viewScope: 'SELF', editScope: 'ALL' });
+// → { canView: true, canEdit: true, effectiveViewScope: 'ALL', effectiveEditScope: 'ALL' }
+```
+
+#### `validateFieldPermissionInvariants(state, field?): string[]`
+
+Returns violation messages. Used in BE mutation handlers to **reject** invalid configurations.
+
+#### `coerceFieldPermission(state, field?): FieldPermissionState`
+
+Returns a corrected state. Used in BE handlers to **auto-correct** before saving, and in FE toggle handlers to compute the next state.
+
+**Coercion strategy for invariant 5:** When `editScope` is broader than `viewScope`, `viewScope` is **upgraded** to match — preserving the admin's intent of "I want to edit ALL" by making view consistent.
+
+#### `validateOperationPermissionInvariants(opName, canExecute): string[]`
+
+Validates operation invariants. Returns `["updateUser cannot be disabled: it is required for core user management"]` if you try to disable `updateUser`.
+
+#### `validateCrossOperationInvariants(permissions: GroupPermissions): CrossOpViolation[]`
+
+Validates cross-operation invariants against a full group permissions snapshot.
+
+#### `coerceCrossOperationInvariants(permissions: GroupPermissions): GroupPermissions`
+
+Auto-corrects cross-operation violations. When `revokeSession.scope=SELF`:
+- Snaps `findSessionsByUserId.scope` to `SELF`
+- Snaps all Session field viewScopes to `SELF`
+
+### Helper Functions
+
+```typescript
+function effectiveViewScope(state): EffectiveScope;  // BYPASSED if !canView
+function effectiveEditScope(state): EffectiveScope;   // BYPASSED if !canView || !canEdit
+function isViewScopeRelevant(state): boolean;          // canView
+function isEditScopeRelevant(state): boolean;          // canView && canEdit
+
+const NON_DISABLEABLE_OPERATIONS: ReadonlySet<string> = new Set(['updateUser']);
+```
+
+---
+
+## Cascade Rules
+
+**File:** `src/cascades.ts`
+
+Cascade rules define automatic side-effects when an operation's state changes. They encode business logic like "you can't restore users if you can't see deleted users."
+
+### All Cascade Rules
+
+#### User Lifecycle Cascades
+
+| Trigger | Event | Effect | Rationale |
+|---------|-------|--------|-----------|
+| `findDeletedUsers` | disabled | Disable `restoreUser`, `hardDeleteUser`, `removeUser` | Can't act on deleted users if you can't see them |
+| `hardDeleteUser` | enabled | Enable `findDeletedUsers` | Can't hard-delete what you can't see |
+| `restoreUser` | enabled | Enable `findDeletedUsers` | Can't restore what you can't see |
+| `findAllUsers` | disabled | Disable `createUser`; set `updateUser.scope=SELF`; force all User field editScopes to SELF | Without user list, creation and editing others makes no sense |
+| `removeUser` | disabled | Disable `restoreUser`, `hardDeleteUser` | Can't manage deleted users without soft-delete |
+
+#### Session Cascades
+
+| Trigger | Event | Effect |
+|---------|-------|--------|
+| `findSessionsByUserId` | disabled | Disable `revokeSession`, `revokeUserSessions` |
+| `findSessionsByUserId` | enabled | Enable `revokeSession` |
+| `findSessionsByUserId` | scope ALL→SELF | Set `revokeSession.scope=SELF`; disable `revokeUserSessions` |
+| `findSessionsByUserId` | scope SELF→ALL | Set `revokeSession.scope=ALL`; enable `revokeUserSessions` |
+
+#### Update Scope Cascades
+
+| Trigger | Event | Effect |
+|---------|-------|--------|
+| `updateUser` | scope ALL→SELF | Disable `removeUser`, `revokeUserSessions`; force User field editScopes to SELF |
+| `updateUser` | scope SELF→ALL | Enable `removeUser`, `revokeUserSessions`; upgrade User field editScopes to ALL |
+
+### Field-Level Cascade Effects
+
+Some cascades target fields, not operations:
+
+```typescript
 {
-  authData: { name: "John", email: "john@example.com" },
-  employmentData: { RAL: 50000 }  // Self-scoped, visible
-}
-
-// User viewing someone else's record:
-{
-  authData: { name: "Jane", email: "jane@example.com" },
-  employmentData: { RAL: null }  // Self-scoped, excluded
+  type: 'field',
+  entityName: 'User',
+  filter: { canEdit: true, editScopeContains: 'ALL' },
+  apply: { editScope: ['SELF'] },
 }
 ```
 
-### 6. RPC Bypasses Permission Checks
+This finds all User fields where `canEdit=true` and editScope includes `ALL`, then forces editScope to `['SELF']`.
 
-Internal RPC calls (MessagePattern/EventPattern) bypass permission checks.
+### Cascade Feedback
 
-```typescript
-// Auth service calling Users service via RPC
-const user = await this.usersClient.send('FIND_USER_BY_EMAIL', { email });
-// OperationGuard is skipped for RPC context
-```
-
-### 7. Internal Calls Without User Context Skip Checks
-
-Federation calls from gateway without user context skip permission checks.
+Each rule can include feedback shown to the admin:
 
 ```typescript
-// Gateway resolving a reference:
-// headers: { 'x-internal-federation-call': '1' }
-// No x-user-id or x-user-groups
-// Result: permission checks skipped
-```
-
-## Permission Cascade Rules
-
-### Group Deletion
-
-When a group is deleted:
-1. All `GroupAssignment` records for that group are deleted
-2. All `Permission` records for that group are deleted
-3. All `OperationPermission` records for that group are deleted
-4. All `PagePermission` records for that group are deleted
-5. `PERMISSIONS_CHANGED` event is emitted
-
-```typescript
-// Grants service
-async removeGroup(groupId: string): Promise<void> {
-  // Delete group
-  await this.groupModel.deleteOne({ _id: groupId });
-
-  // Delete all permissions for this group
-  await this.permissionModel.deleteMany({ groupId });
-  await this.opPermissionModel.deleteMany({ groupId });
-  await this.pagePermissionModel.deleteMany({ groupId });
-
-  // Notify group deletion
-  this.redisClient.emit('GROUP_DELETED', { groupId });
-  this.redisClient.emit('PERMISSIONS_CHANGED', { groupIds: [groupId] });
+feedback: {
+  level: 'info',
+  message: 'Restore user and permanent delete have been automatically disabled — ...',
 }
 ```
 
-### User Deletion
-
-When a user is deleted:
-1. All `GroupAssignment` records for that user are deleted
-2. All sessions are revoked
-3. Milestone assignments are cleaned up
-
-### Permission Change Events
-
-When permissions change:
-1. `PERMISSIONS_CHANGED` event is emitted with affected group IDs
-2. All services invalidate their permission cache for those groups
-
-## Protected Operations
-
-Certain operations are considered "protected" and have additional guards:
-
-### Bootstrap Operations
+### Lookup Function
 
 ```typescript
-// Only callable via RPC with internal secret
-@UseGuards(RpcInternalGuard)
-@MessagePattern('CREATE_GROUP')
-async createGroup(@Payload() dto: CreateGroupInput) {}
+function getCascadeRules(trigger: string, on: OpTriggerEvent): CascadeRule[];
 ```
 
-### Admin-Only Operations
+---
+
+## Operation Access
+
+**File:** `src/operationAccess.ts`
+
+Defines security boundaries for the permission system itself.
+
+### `PROTECTED_OPERATIONS: ReadonlySet<string>`
+
+Operations that manage the permission system. **Only SUPERADMIN can grant `canExecute` on these.** This prevents privilege escalation: a non-SUPERADMIN cannot give themselves control over groups, permissions, or operation permissions.
+
+Includes all CRUD operations for: groups, permissions, operation permissions, page permissions, and gateway introspection (`listFieldsFromGateway`, `listOperationsFromGateway`).
+
+### `HIDDEN_FROM_MY_PERMISSIONS: ReadonlySet<string>`
+
+Operations filtered from the `myPermissions` API response. Prevents information disclosure about the internal grants system to non-admin users.
+
+**Important:** `findAllGroups` and `findOneGroup` are intentionally **NOT hidden** because the FE sidebar needs them to determine which navigation items to show.
+
+### Functions
 
 ```typescript
-// Check for SUPERADMIN group
-if (!req.user.groups?.includes('SUPERADMIN')) {
-  throw new ForbiddenException('SUPERADMIN required');
-}
+function isProtectedOperation(name: string): boolean;
+function isHiddenFromMyPermissions(name: string): boolean;
 ```
 
-### Self-Only Operations
+---
+
+## Field Groups
+
+**File:** `src/fieldGroups.ts`
+
+Logically coupled fields that must always be modified together. When one field in a group changes state (canView, canEdit, viewScope, editScope), all siblings must receive the same state.
+
+### All Field Groups
+
+| Field | Siblings | Reason |
+|-------|----------|--------|
+| `authData.name` | `authData.surname` | Name always paired with surname |
+| `authData.surname` | `authData.name` | Same |
+| `personalData.languages.code` | `personalData.languages.level` | Language code and level always together |
+| `personalData.languages.level` | `personalData.languages.code` | Same |
+| `additionalFieldsData.billable` | `employmentData.rates` | Billable status and rates always together |
+| `employmentData.rates` | `additionalFieldsData.billable` | Same |
+| `additionalFieldsData.seniorityLevel` | `additionalFieldsData.seniorityLevelId` | FK ↔ resolved field pair |
+| `additionalFieldsData.jobRoles` | `additionalFieldsData.jobRoleIds` | FK ↔ resolved field pair |
+| `additionalFieldsData.company` | `additionalFieldsData.companyId` | FK ↔ resolved field pair |
+| `additionalFieldsData.supervisors` | `additionalFieldsData.supervisorIds` | FK ↔ resolved field pair |
+
+**FK ↔ resolved field pairs:** The introspection system filters out FK IDs from the UI, but the permission DB may still contain them. This grouping ensures FK IDs stay aligned when the resolved field is toggled.
+
+### Functions
 
 ```typescript
-// Cannot delete yourself
-if (userId === currentUserId) {
-  throw new ForbiddenException('Cannot delete yourself');
-}
+function getFieldSiblings(entityName: string, fieldPath: string): string[];
+function hasFieldSiblings(entityName: string, fieldPath: string): boolean;
 ```
 
-## Default Permissions
+---
 
-The bootstrap service creates default permissions:
+## Pages
 
-### SUPERADMIN Group
+**File:** `src/pages.ts`
 
-- All operations: `canExecute: true`
-- All fields: `canView: true`, `canEdit: true`
-- Scope: `all` (everywhere)
+Maps routes to required operations. Used by the FE `PageGuard` and BE page access validation.
 
-### Default User Group
+### All Pages
 
-Typical permissions for regular users:
+| Page Key | Route Prefix | Required Operations |
+|----------|-------------|---------------------|
+| `people` | `/setup/people` | `findAllUsers` |
+| `groups` | `/setup/groups` | *(none)* |
+| `settings` | `/setup/settings` | *(none)* |
+| `settings.seniorityLevels` | `/setup/settings/seniority` | *(none)* |
+| `settings.jobRoles` | `/setup/settings/roles` | *(none)* |
+| `settings.companies` | `/setup/settings/companies` | *(none)* |
+| `projects` | `/setup/projects` | *(none)* |
+| `milestones` | `/setup/drafts` | *(none)* |
 
-| Entity | Field | canView | canEdit | Scope |
-|--------|-------|---------|---------|-------|
-| User | authData.name | true | false | all |
-| User | authData.email | true | false | all |
-| User | employmentData.RAL | true | false | self |
-| User | personalData.* | true | true | self |
-
-## Permission Caching
-
-### Cache Key
-
-```
-Sorted group IDs joined by comma
-Example: "group-admin,group-manager"
-```
-
-### Cache TTL
+### Functions
 
 ```typescript
-private static TTL = 5 * 60 * 1000; // 5 minutes
+function resolvePageKey(pathname: string): string | undefined;
+function getPageDefinition(pageKey: string): PageDefinition | undefined;
+
+const PAGE_MAP: Map<string, PageDefinition>;
 ```
 
-### Cache Invalidation
+`resolvePageKey` matches the most specific route prefix first (sorted by length descending).
+
+---
+
+## UI Constraints
+
+**File:** `src/uiConstraints.ts`
+
+Pure functions that derive UI state (disabled/locked/forced) from current permission configuration. Used by both FE (to render toggle states) and BE (to validate mutations).
+
+### Operation Constraints
 
 ```typescript
-// Invalidate specific groups
-PermissionsCacheService.invalidateGroups(['group-123']);
-
-// Invalidate all
-PermissionsCacheService.invalidateAll();
+// updateUser toggle is always locked to ON
+function isOperationCanExecuteLocked(operationName: string): boolean;
+function getOperationCanExecuteLockReason(operationName: string): string | undefined;
 ```
 
-### When to Invalidate
+### Field Edit Scope Constraints
 
-- Permission created/updated/deleted
-- Group created/updated/deleted
-- User added/removed from group
-
-## Best Practices
-
-### 1. Design Groups Around Roles
-
-```
-SUPERADMIN  → Full system access
-ADMIN       → Manage users, read all data
-MANAGER     → Manage own team, read team data
-EMPLOYEE    → Read own data, limited edit
-VIEWER      → Read-only access
-```
-
-### 2. Use Scope for Sensitive Data
-
-```graphql
-mutation {
-  createPermission(input: {
-    groupId: "employee-group"
-    entityName: "User"
-    fieldPath: "employmentData.RAL"
-    canView: true
-    canEdit: false
-    scope: "self"  # Only see own salary
-  }) { _id }
-}
-```
-
-### 3. Grant Operations First
-
-Before a user can see any fields, they need operation access:
-
-```graphql
-# Step 1: Grant operation access
-mutation {
-  createOperationPermission(input: {
-    groupId: "viewer-group"
-    operationName: "findAllUsers"
-    canExecute: true
-  }) { _id }
-}
-
-# Step 2: Grant field access
-mutation {
-  createPermission(input: {
-    groupId: "viewer-group"
-    entityName: "User"
-    fieldPath: "authData.name"
-    canView: true
-  }) { _id }
-}
-```
-
-### 4. Test Permission Changes
-
-After changing permissions, verify:
-
-1. Cache invalidation event was sent
-2. Affected users see updated access
-3. Edge cases (multi-group users) work correctly
-
-### 5. Monitor Permission Denials
-
-Log permission denials for security auditing:
+When `updateUser.scope = SELF`, all User field editScope toggles are **disabled and forced to SELF**.
 
 ```typescript
-if (!this.opSet.has(op)) {
-  this.logger.warn(`Permission denied: ${op} for groups ${groups}`);
-  throw new ForbiddenException(`Operation "${op}" not allowed`);
+interface FieldEditScopeConstraint {
+  disabled: boolean;
+  forcedScope?: ScopeValue;
+  reason?: string;
 }
+
+function getFieldEditScopeConstraint(entityName: string, opPermMap: Map<string, OpPermSnapshot>): FieldEditScopeConstraint;
+function isFieldEditScopeDisabled(entityName: string, opPermMap: Map<string, OpPermSnapshot>): boolean;
+function getForcedEditScope(entityName: string, opPermMap: Map<string, OpPermSnapshot>): ScopeValue | undefined;
 ```
 
-## Next Steps
+### Read-Only Field Constraints
 
-- [Grants Service](/services/grants) - Permission management API
-- [Add New Permission Guide](/guides/add-new-permission) - Step-by-step guide
+```typescript
+function isFieldCanEditLocked(entityName: string, fieldPath: string): boolean;
+function getFieldCanEditLockReason(entityName: string, fieldPath: string): string | undefined;
+```
+
+### Fixed Scope Constraints
+
+```typescript
+function getFieldFixedViewScope(entityName: string, fieldPath: string): 'ALL' | 'SELF' | undefined;
+function getFieldFixedEditScope(entityName: string, fieldPath: string): 'ALL' | 'SELF' | undefined;
+```
+
+### RESTRICTED Field Warnings
+
+Non-blocking awareness notifications for highly sensitive fields:
+
+```typescript
+function getRestrictedFieldWarning(entityName: string, fieldPath: string): CascadeFeedback | null;
+function isRestrictedField(entityName: string, fieldPath: string): boolean;
+function getBatchRestrictedFieldWarning(fields: Pick<FieldPermSnapshot, 'entityName' | 'fieldPath'>[]): CascadeFeedback | null;
+```
+
+### BE Validation Helper
+
+```typescript
+function validateFieldPermissionConstraints(
+  entityName: string,
+  fieldPath: string,
+  incoming: { editScope?: ScopeValue },
+  opPermMap: Map<string, OpPermSnapshot>,
+): string[];
+```
+
+---
+
+## How BE and FE Consume These Rules
+
+### Backend (Grants Service)
+
+The grants service (`cucu-nest/apps/grants/src/grants.service.ts`) imports:
+- `OPERATION_DEFINITIONS` — to seed initial operations when creating a group
+- `FIELD_DEFINITIONS` — to validate field paths
+- `validateFieldPermissionInvariants()` — to reject invalid mutations
+- `coerceFieldPermission()` — to auto-correct before saving
+- `isProtectedOperation()` — to enforce SUPERADMIN-only grants
+- `isHiddenFromMyPermissions()` — to filter `myPermissions` responses
+- `getFieldSiblings()` — to sync coupled fields on updates
+- `getCascadeRules()` — to apply cascading effects after mutations
+- `validateCrossOperationInvariants()` — to validate full group snapshot
+
+### Frontend (Next.js)
+
+The frontend imports:
+- `usePermissionDependencies` hook — reads `CASCADE_RULES` to apply cascades in real-time as admin toggles permissions
+- `PageGuard` — reads `PAGE_DEFINITIONS` to control route access
+- `uiConstraints` functions — to determine toggle disabled/locked states
+- `OPERATION_DEFINITIONS` / `FIELD_DEFINITIONS` — to render labels and descriptions
+
+---
+
+## Used By
+
+| Consumer | How Used |
+|----------|----------|
+| **grants service (BE)** | Invariant validation, cascade application, field groups, protected operations, scope enforcement |
+| **cucu-frontend (FE)** | `usePermissionDependencies` hook, `useUpdateUserScopeHandler` hook, PageGuard, permission editor UI |
+
+---
+
+## Design Decisions
+
+1. **Zero dependencies** — This library has no framework deps, making it safe to import in any context (Node, browser, tests)
+2. **Single source of truth** — Adding a new operation means adding one entry to `OPERATION_DEFINITIONS`. No service or component changes needed for basic support.
+3. **Cascades replace hardcoded logic** — Originally, cascade logic was scattered across FE components and BE handlers. Now it's declarative data in `CASCADE_RULES`.
+4. **Invariants are separate from cascades** — Invariants are mathematical constraints (always true). Cascades are business rules (applied when events happen). This separation prevents confusion about what's enforced vs. suggested.
+5. **UI constraints are pure functions** — The UI never computes toggle states itself. It calls `getFieldEditScopeConstraint()` and renders accordingly. This guarantees UI and BE agree on what's allowed.

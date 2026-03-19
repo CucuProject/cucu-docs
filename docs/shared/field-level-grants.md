@@ -1,373 +1,244 @@
-# Field-Level Grants Library
+# @cucu/field-level-grants
 
-The `field-level-grants` library provides utilities for introspecting GraphQL schemas and building field projections for permission filtering.
+> GraphQL schema introspection and Mongoose projection building for field-level permission enforcement. Provides local schema analysis (without contacting the gateway) and projection helpers for per-entity field filtering.
 
-## Location
+## Architecture Overview
 
+```mermaid
+graph TB
+    subgraph "field-level-grants"
+        LSFS["LocalSchemaFieldsService"]
+        GPH["buildMongooseProjection()"]
+    end
+
+    subgraph "NestJS GraphQL"
+        GSH["GraphQLSchemaHost"]
+        Schema["Local Subgraph Schema"]
+    end
+
+    subgraph "Grants Service"
+        GS["GrantsService"]
+        Introspection["IntrospectionResolver"]
+    end
+
+    subgraph "Per-Service Usage"
+        Users["users service"]
+        Auth["auth service"]
+        Others["... other services"]
+    end
+
+    GSH --> Schema
+    LSFS --> GSH
+    LSFS --> Schema
+
+    GS --> LSFS
+    Introspection --> LSFS
+    Users --> LSFS
+    Users --> GPH
+    Auth --> LSFS
+
+    style LSFS fill:#e1f5fe
+    style GPH fill:#fff3e0
 ```
-_shared/field-level-grants/src/
-├── introspection-fields.service.ts
-├── universal-grants-lookup.service.ts
-├── grants-projection.helper.ts
-└── index.ts
-```
+
+## Module Index
+
+| Export | Type | Purpose |
+|--------|------|---------|
+| `LocalSchemaFieldsService` | Injectable Service | Introspects local GraphQL schema to discover entity fields |
+| `LocalIntrospectionConfig` | Interface | Configuration for the introspection service |
+| `buildMongooseProjection` | Function | Converts a field set to a Mongoose projection string |
+
+---
 
 ## LocalSchemaFieldsService
 
-Introspects the local GraphQL schema to collect all field paths for an entity.
+**File:** `src/introspection-fields.service.ts`
+
+An injectable NestJS service that introspects the **local subgraph schema** (not the gateway's federated schema) to discover all field paths for an entity type. Uses `GraphQLSchemaHost` provided by `@nestjs/graphql`.
+
+### Why Local Introspection?
+
+In a federated GraphQL architecture, each service owns a subset of the schema. Rather than querying the gateway for field information (which introduces a circular dependency and network hop), each service introspects its own schema to determine which fields it owns.
+
+This is used for:
+1. **Grants service:** Listing available fields for the permission UI (`listFieldsFromGateway` operation)
+2. **Per-service resolvers:** Determining which fields exist on an entity to validate permission configurations
+3. **Warm-up at startup:** Pre-loading field paths to avoid repeated schema traversal
 
 ### Configuration
 
 ```typescript
 interface LocalIntrospectionConfig {
-  maxDepth?: number;          // Default: 2 (e.g., "authData.email")
-  debug?: boolean;            // Default: false
-  allowedTypes?: string[];    // Types to recurse into
+  maxDepth?: number;       // Max recursion depth (default: 2)
+  debug?: boolean;         // Enable debug logging (default: false)
+  allowedTypes?: string[]; // Types to recurse into (whitelist)
 }
 ```
 
-### Usage
+**`allowedTypes`** is crucial: it prevents the service from recursing into types it doesn't own. For example, the `users` service would set:
+```typescript
+service.configure({
+  allowedTypes: ['User', 'AuthDataSchema', 'PersonalDataSchema', 'EmploymentDataSchema', 'AdditionalFieldsSchema'],
+  maxDepth: 2,
+});
+```
+
+Without this whitelist, the service might try to recurse into federated reference types (like `Group` or `Project`) that belong to other subgraphs.
+
+### Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant NestJS
+    participant LSFS as LocalSchemaFieldsService
+    participant Schema as GraphQLSchema
+
+    NestJS->>LSFS: constructor(schemaHost)
+    Note over LSFS: Schema not yet available
+
+    NestJS->>LSFS: onModuleInit()
+    LSFS->>Schema: this.schemaHost.schema
+    Note over LSFS: Schema loaded
+
+    NestJS->>LSFS: configure({ maxDepth, allowedTypes })
+    Note over LSFS: Config applied
+
+    NestJS->>LSFS: warmUpEntities(['User', ...])
+    LSFS->>Schema: getTypeMap() → visit fields recursively
+    Note over LSFS: Fields cached in fieldsCache
+```
+
+### Methods
+
+#### `configure(cfg: LocalIntrospectionConfig): void`
+
+Sets runtime configuration. Must be called **before** `warmUpEntities()`.
+
+#### `warmUpEntities(entityNames: string[]): void`
+
+Pre-loads field paths for the given entity names into an internal cache (`Map<string, Set<string>>`). Call this at service startup for optimal performance.
+
+**Throws** if the schema is not yet available (i.e., if called before `onModuleInit`).
+
+#### `getAllFieldsForEntity(entityName: string): Set<string>`
+
+Returns all field paths for an entity. Cached after first computation.
+
+**Example output for `'User'`:**
+```
+Set {
+  '_id', 'authData', 'authData.name', 'authData.surname', 'authData.email',
+  'authData.groupIds', 'personalData', 'personalData.dateOfBirth',
+  'employmentData', 'employmentData.RAL', 'employmentData.rates', ...
+}
+```
+
+### Field Path Collection Algorithm
+
+The internal `collectAllFieldsOfEntity` method uses recursive schema traversal:
+
+1. Look up the entity type in `schema.getTypeMap()`
+2. Verify it's in `allowedTypes` (skip otherwise)
+3. For each field in the type:
+   a. Add the field path (e.g., `authData.name` where prefix=`authData`, fieldName=`name`)
+   b. If the field's type is an `ObjectType` AND is in `allowedTypes` AND depth < maxDepth:
+      - Recurse into it with incremented depth
+4. `getNamedType()` is used to unwrap `NonNull` and `List` wrappers before checking type kind
+
+**Depth control:** With `maxDepth=2`, the service collects:
+- Depth 1: `authData`, `personalData`, `employmentData` (top-level fields)
+- Depth 2: `authData.name`, `authData.email`, `personalData.dateOfBirth` (nested fields)
+- Depth 3+: NOT collected (prevents deep nesting explosion)
+
+---
+
+## buildMongooseProjection
+
+**File:** `src/grants-projection.helper.ts`
 
 ```typescript
-@Injectable()
-export class LocalSchemaFieldsService {
-  constructor(private readonly schemaHost: GraphQLSchemaHost) {}
-
-  configure(cfg: LocalIntrospectionConfig): void {
-    this.maxDepth = cfg.maxDepth ?? 2;
-    this.debug = cfg.debug ?? false;
-    this.allowedTypes = new Set(cfg.allowedTypes ?? []);
-  }
-
-  warmUpEntities(names: string[]): void {
-    for (const name of names) {
-      this.getAllFieldsForEntity(name);
-    }
-  }
-
-  getAllFieldsForEntity(entityName: string): Set<string> {
-    if (this.fieldsCache.has(entityName)) {
-      return this.fieldsCache.get(entityName)!;
-    }
-
-    const schema = this.schemaHost.schema;
-    const type = schema.getType(entityName) as GraphQLObjectType;
-
-    const fields = new Set<string>();
-    this.collectFields(type, '', 0, fields);
-
-    this.fieldsCache.set(entityName, fields);
-    return fields;
-  }
-
-  private collectFields(
-    type: GraphQLObjectType,
-    prefix: string,
-    depth: number,
-    result: Set<string>
-  ): void {
-    if (depth > this.maxDepth) return;
-
-    const fields = type.getFields();
-    for (const [name, field] of Object.entries(fields)) {
-      const path = prefix ? `${prefix}.${name}` : name;
-      result.add(path);
-
-      const innerType = this.unwrapType(field.type);
-      if (
-        innerType instanceof GraphQLObjectType &&
-        this.allowedTypes.has(innerType.name)
-      ) {
-        this.collectFields(innerType, path, depth + 1, result);
-      }
-    }
-  }
-}
+export function buildMongooseProjection(fields: Set<string>): string;
 ```
 
-### Module Setup
+Converts a set of field paths to a Mongoose `.select()` string:
 
 ```typescript
-@Module({
-  providers: [LocalSchemaFieldsService],
-  exports: [LocalSchemaFieldsService],
-})
-export class FieldLevelGrantsModule {}
-
-// In service module
-export class UsersModule implements OnModuleInit {
-  constructor(private readonly introspection: LocalSchemaFieldsService) {}
-
-  onModuleInit() {
-    this.introspection.configure({
-      maxDepth: 2,
-      debug: true,
-      allowedTypes: [
-        'User',
-        'AuthDataSchema',
-        'PersonalDataSchema',
-        'EmploymentDataSchema',
-        'AdditionalFieldsDataSchema',
-      ],
-    });
-    this.introspection.warmUpEntities(['User']);
-  }
-}
+buildMongooseProjection(new Set(['authData.name', 'authData.email', 'personalData.dateOfBirth']))
+// → 'authData.name authData.email personalData.dateOfBirth'
 ```
 
-## UniversalGrantsLookupService
+**Note:** This produces a space-separated string for Mongoose's `.select()` syntax, not a projection object. For projection objects (`{ field: 1 }`), use `buildProjection()` from `@cucu/service-common`.
 
-Provides dual-mode lookup for viewable fields - via RPC or local adapter.
+---
 
-### Modes
+## Integration with the Permission System
 
-#### Mode 1: External (RPC)
+```mermaid
+graph LR
+    subgraph "Setup Phase"
+        LSFS["LocalSchemaFieldsService"]
+        WarmUp["warmUpEntities()"]
+    end
 
-```typescript
-@Injectable()
-export class UniversalGrantsLookupService {
-  constructor(
-    @Inject('GRANTS_SERVICE') private readonly remoteClient?: ClientProxy,
-  ) {}
+    subgraph "Request Phase"
+        PermCache["PermissionsCacheService"]
+        ViewFields["ViewFieldsInterceptor"]
+        BProj["buildMongooseProjection()"]
+        Query["Mongoose .select()"]
+    end
 
-  async getViewableFieldsForEntity(
-    groupIds: string[],
-    entityName: string
-  ): Promise<Set<string>> {
-    const union = new Set<string>();
-
-    for (const groupId of groupIds) {
-      const permissions = await lastValueFrom(
-        this.remoteClient!.send<Permission[]>('FIND_PERMISSIONS_BY_GROUP', {
-          groupId,
-          entityName,
-        })
-      );
-
-      for (const p of permissions) {
-        if (p.canView) {
-          union.add(p.fieldPath);
-        }
-      }
-    }
-
-    return union;
-  }
-}
+    LSFS --> WarmUp
+    WarmUp -->|"Set<fieldPaths>"| PermCache
+    PermCache -->|"viewable fields"| ViewFields
+    ViewFields -->|"Set<string>"| BProj
+    BProj -->|"select string"| Query
 ```
 
-#### Mode 2: Local Adapter
+### Flow:
 
-For services that need to bypass RPC (e.g., Grants service itself):
+1. **At startup:** `LocalSchemaFieldsService.warmUpEntities()` discovers all field paths for the entity
+2. **Per request:** `ViewFieldsInterceptor` (from `service-common`) calls `PermissionsCacheService.ensureEntityLoaded()` to get the user's viewable fields for the entity
+3. The viewable fields are intersected with the known schema fields
+4. `buildMongooseProjection()` converts the viewable set to a Mongoose-compatible format
+5. The service uses this projection in its database queries
 
-```typescript
-interface IGrantsLocalAdapter {
-  findPermissionsByGroup(groupId: string): Promise<Permission[]>;
-}
+---
 
-@Injectable()
-export class UniversalGrantsLookupService {
-  constructor(
-    @Optional()
-    @Inject('GRANTS_LOCAL_ADAPTER')
-    private readonly localAdapter?: IGrantsLocalAdapter,
-  ) {}
+## Used By
 
-  async getViewableFieldsForEntity(
-    groupIds: string[],
-    entityName: string
-  ): Promise<Set<string>> {
-    if (this.localAdapter) {
-      // Use local adapter
-      return this.fetchLocal(groupIds, entityName);
-    }
-    // Fall back to RPC
-    return this.fetchRemote(groupIds, entityName);
-  }
-}
+| Service | How Used |
+|---------|----------|
+| **grants** | `LocalSchemaFieldsService` for `listFieldsFromGateway` introspection resolver; field discovery for permission CRUD |
+| **users** | `LocalSchemaFieldsService` for User entity field introspection; `buildMongooseProjection` for query filtering |
+| **auth** | `LocalSchemaFieldsService` for Session entity field discovery |
+| **group-assignments** | `LocalSchemaFieldsService` for entity introspection |
+| **milestones** | `LocalSchemaFieldsService` for Milestone entity fields |
+| **milestone-to-project** | `LocalSchemaFieldsService` for junction entity fields |
+| **milestone-to-user** | `LocalSchemaFieldsService` for junction entity fields |
+| **organization** | `LocalSchemaFieldsService` for Company/JobRole/SeniorityLevel fields |
+| **projects** | `LocalSchemaFieldsService` for Project/ProjectTemplate fields |
+| **project-access** | `LocalSchemaFieldsService` for ProjectAccess entity fields |
+| **tenants** | `LocalSchemaFieldsService` for Tenant entity fields |
+
+---
+
+## Relationship to Other Libraries
+
+```mermaid
+graph LR
+    FLG["@cucu/field-level-grants"]
+    SC["@cucu/service-common"]
+    PR["@cucu/permission-rules"]
+
+    SC -->|"buildProjection() (object form)"| SC
+    FLG -->|"buildMongooseProjection() (string form)"| FLG
+    PR -->|"FIELD_DEFINITIONS (what fields exist)"| PR
+
+    SC -->|"ViewFieldsInterceptor uses<br>field sets from"| FLG
+    FLG -.->|"validates against"| PR
 ```
 
-## GrantsProjectionHelper
-
-Builds MongoDB projections from viewable field sets.
-
-### buildMongooseProjection
-
-```typescript
-export function buildMongooseProjection(fields: Set<string>): string {
-  // Returns space-separated field list for Mongoose select()
-  return Array.from(fields).join(' ');
-}
-
-// Usage
-const projection = buildMongooseProjection(viewableFields);
-const user = await this.userModel.find({}).select(projection);
-```
-
-### buildProjection (Object Form)
-
-```typescript
-export function buildProjection(viewable: Set<string>): Record<string, 1> {
-  const proj: Record<string, 1> = {};
-  const all = Array.from(viewable);
-
-  for (const path of all) {
-    // If a child exists, skip the parent
-    // e.g., if "authData.email" exists, skip "authData"
-    const hasChildren = all.some(p => p.startsWith(path + '.'));
-    if (hasChildren) continue;
-    proj[path] = 1;
-  }
-
-  return proj;
-}
-
-// Usage
-const proj = buildProjection(viewableFields);
-// { "_id": 1, "authData.name": 1, "authData.email": 1 }
-
-const user = await this.userModel.findOne({ _id }, proj);
-```
-
-## Integration Example
-
-Complete example of field-level grants in a service:
-
-```typescript
-@Injectable()
-export class UsersService {
-  private static readonly SYSTEM_FIELDS = [
-    '_id', 'deletedAt', 'deletedBy', 'updatedBy', 'createdAt', 'updatedAt'
-  ];
-
-  constructor(
-    @InjectModel(User.name) private userModel: Model<UserDocument>,
-    private readonly permCache: PermissionsCacheService,
-    @Inject('SUBGRAPH_CONTEXT') private uctx: ISubgraphContext,
-  ) {}
-
-  async findById(
-    userId: string,
-    viewable?: Set<string>
-  ): Promise<User | null> {
-    const allowed = await this.allowedSet('User', viewable);
-    const projection = this.projection(allowed);
-
-    const user = await this.userModel
-      .findOne({ _id: userId, deletedAt: null }, projection)
-      .lean()
-      .exec();
-
-    return this.sanitizeScoped(user, allowed, userId);
-  }
-
-  private async allowedSet(
-    entity: string,
-    external?: Set<string>
-  ): Promise<Set<string> | undefined> {
-    if (external) return external;
-
-    // Skip for internal calls without user context
-    if (this.uctx?.isInternalCall() && !this.uctx?.hasUserContext()) {
-      return undefined;
-    }
-
-    const groups = this.uctx?.userGroups() ?? [];
-    await this.permCache.ensureEntityLoaded(entity, groups);
-
-    const auto = this.permCache.getViewableFieldsForEntity(entity);
-    if (auto.size === 0) {
-      throw new ForbiddenException(`No view permission on "${entity}"`);
-    }
-    return auto;
-  }
-
-  private projection(set?: Set<string>) {
-    if (!set?.size) return undefined;
-
-    const augmented = new Set(set);
-    // Always include system fields
-    for (const sf of UsersService.SYSTEM_FIELDS) {
-      augmented.add(sf);
-    }
-    return buildProjection(augmented);
-  }
-
-  private sanitizeScoped(
-    obj: any,
-    allowed?: Set<string>,
-    recordId?: string
-  ): any {
-    if (!allowed) return this.sanitize(obj, allowed);
-
-    const currentUid = this.uctx?.currentUserId();
-
-    // Own record: full access
-    if (!currentUid || recordId === currentUid) {
-      return this.sanitize(obj, allowed);
-    }
-
-    // Other user's record: exclude self-only fields
-    const { allFields } = this.permCache.getFieldsByScope('User');
-    return this.sanitize(obj, allFields);
-  }
-
-  private sanitize(obj: any, allowed?: Set<string>): any {
-    if (!obj || !allowed) return obj;
-
-    // Recursively filter object to only include allowed paths
-    // Convert empty objects/arrays to null for GraphQL
-    // ... implementation
-  }
-}
-```
-
-## Field Path Examples
-
-```typescript
-// Entity: User
-// Fields discovered by introspection:
-[
-  '_id',
-  'authData',
-  'authData.name',
-  'authData.surname',
-  'authData.email',
-  'authData.groupIds',
-  'personalData',
-  'personalData.dateOfBirth',
-  'personalData.citizenship',
-  'employmentData',
-  'employmentData.dateOfEmployment',
-  'employmentData.RAL',
-  'employmentData.rates',
-  'additionalFieldsData',
-  'additionalFieldsData.active',
-  'additionalFieldsData.seniorityLevelId',
-  'additionalFieldsData.supervisorIds',
-]
-
-// Projection for VIEWER group (limited access):
-{
-  '_id': 1,
-  'authData.name': 1,
-  'authData.surname': 1,
-  'additionalFieldsData.active': 1,
-}
-
-// Projection for ADMIN group (full access):
-{
-  '_id': 1,
-  'authData.name': 1,
-  'authData.surname': 1,
-  'authData.email': 1,
-  'personalData.dateOfBirth': 1,
-  'employmentData.RAL': 1,
-  // ... all fields
-}
-```
-
-## Next Steps
-
-- [Service Common](/shared/service-common) - Guards and interceptors
-- [Permission System](/architecture/permissions) - How permissions work
+- **`@cucu/service-common`** provides `buildProjection()` → returns `{ field: 1 }` objects for Mongoose `.find(query, projection)`
+- **`@cucu/field-level-grants`** provides `buildMongooseProjection()` → returns space-separated strings for Mongoose `.select()`
+- **`@cucu/permission-rules`** defines which fields exist (`FIELD_DEFINITIONS`) — the grants service uses both libraries to validate that permission configurations reference real fields

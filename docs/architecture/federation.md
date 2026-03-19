@@ -1,6 +1,6 @@
 # Apollo Federation 2
 
-Cucu uses **Apollo Federation 2** to compose a unified GraphQL schema from 11 subgraph services. The Gateway runs `IntrospectAndCompose` to dynamically discover and compose subgraph schemas.
+Cucu uses **Apollo Federation 2** to compose a unified GraphQL schema from 12 subgraph services. The Gateway runs `IntrospectAndCompose` to dynamically discover and compose subgraph schemas.
 
 ## Gateway Composition
 
@@ -21,6 +21,7 @@ export function getSubgraphs(configService: ConfigService) {
     { nameKey: 'MILESTONE_TO_PROJECT_SERVICE_NAME', ... },
     { nameKey: 'PROJECT_ACCESS_SERVICE_NAME', ... },
     { nameKey: 'ORGANIZATION_SERVICE_NAME', ... },
+    { nameKey: 'HOLIDAYS_SERVICE_NAME', ... },
     { nameKey: 'TENANTS_SERVICE_NAME', ... },
   ];
   return services.map(({ nameKey, hostKey, portKey }) => ({
@@ -65,7 +66,9 @@ Each entity is owned by exactly one service (marked with `@Directive('@key(field
 | `JobRole` | organization | `_id` |
 | `Company` | organization | `_id` |
 | `RoleCategory` | organization | `_id` |
-| `HolidayCalendar` | projects | `_id` |
+| `HolidayCalendar` | holidays | `_id` |
+| `CompanyClosure` | holidays | `_id` |
+| `UserAbsence` | holidays | `_id` |
 | `Tenant` | tenants | `_id` |
 | `ResourceDailyAllocation` | milestone-to-user | `_id` |
 

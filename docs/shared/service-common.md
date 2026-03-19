@@ -58,6 +58,7 @@ graph TB
 | `OperationGuard` | Guard | Validates operation-level permissions on GraphQL resolvers |
 | `ScopeGuard` | Guard | Enforces `self` vs `all` scope on operations |
 | `RpcInternalGuard` | Guard | Protects sensitive RPC handlers with `_internalSecret` |
+| `PlatformAdminGuard` | Guard | Restricts access to platform administrators only |
 | `createViewFieldsInterceptor` | Factory | Creates entity-specific field-level permission interceptor |
 | `FieldViewInterceptor` | Interceptor | Per-resolver field visibility check |
 | `CheckFieldView` | Decorator | Marks a resolver with entity/field metadata for `FieldViewInterceptor` |
@@ -343,6 +344,30 @@ Protects sensitive RPC mutation handlers from unauthorized Redis callers. Used s
 - **Timing-safe:** Uses `crypto.timingSafeEqual()` to prevent timing attacks
 - **Clean-up:** Strips `_internalSecret` from payload before the handler sees it
 
+### `PlatformAdminGuard`
+
+**File:** `src/guards/platform-admin.guard.ts`
+
+Restricts GraphQL mutations to platform-level administrators only. Unlike `RpcInternalGuard` (which protects RPC endpoints), this guard is for HTTP/GraphQL endpoints that should only be accessible to platform admins.
+
+**How it works:**
+1. Reads `x-user-email` from gateway-propagated headers
+2. Calls `CHECK_PLATFORM_ADMIN` RPC on the Tenants service
+3. Throws `ForbiddenException` if user is not a platform admin
+
+**Requirements for consuming services:**
+- Register `TENANTS_SERVICE` as an RPC client in the module
+- Gateway must propagate `x-user-email` header from JWT payload
+
+**Usage:**
+```typescript
+@UseGuards(PlatformAdminGuard)
+@Mutation(() => HolidayCalendar)
+async upsertHolidayCalendar(@Args('input') input: UpsertHolidayCalendarInput) { ... }
+```
+
+**Use case:** The Holidays service uses this guard to restrict national holiday calendar mutations (which affect all tenants) to platform administrators.
+
 ### `createViewFieldsInterceptor(entities: string[])`
 
 **File:** `src/permissions/load-fields.interceptor.ts`
@@ -530,6 +555,7 @@ Every backend microservice depends on `@cucu/service-common`. Here's how each se
 | **milestone-to-project** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `RpcInternalGuard` | Junction service: milestone ↔ project |
 | **milestone-to-user** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `RpcInternalGuard` | Junction service: milestone ↔ user |
 | **project-access** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard` | Project access control |
+| **holidays** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `PlatformAdminGuard` | Holiday calendars, company closures, user absences |
 
 ---
 

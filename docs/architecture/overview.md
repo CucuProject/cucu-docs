@@ -17,7 +17,7 @@ The Cucu platform is a **multi-tenant, distributed microservices architecture** 
 | **gateway** | 3000 | N/A | Apollo Federation gateway, REST auth endpoints, JWT validation |
 | **auth** | 3001 | `auth_{tenant}` | Session management, JWT token issuance, refresh rotation |
 | **users** | 3002 | `users_{tenant}` | User CRUD, profiles (AuthData, PersonalData, EmploymentData) |
-| **projects** | 3003 | `projects_{tenant}` | Project management, templates, holiday calendars |
+| **projects** | 3003 | `projects_{tenant}` | Project management, templates |
 | **milestones** | 3004 | `milestones_{tenant}` | Milestone CRUD, status tracking, dependencies |
 | **milestone-to-user** | 3005 | `milestone-to-user_{tenant}` | N:N user↔milestone assignments, resource daily allocations |
 | **milestone-to-project** | 3006 | `milestone-to-project_{tenant}` | N:N project↔milestone assignments |
@@ -25,7 +25,8 @@ The Cucu platform is a **multi-tenant, distributed microservices architecture** 
 | **project-access** | 3008 | `project-access_{tenant}` | Project-level role-based access control |
 | **grants** | 3010 | `grants_{tenant}` | Groups, Permissions, OperationPermissions, PagePermissions |
 | **organization** | 3012 | `organization_{tenant}` | Lookup tables: SeniorityLevel, JobRole, Company, RoleCategory |
-| **tenants** | 3013 | Platform DB (shared) | Tenant registry, user identities, provisioning |
+| **holidays** | 3013 | `holidays` (shared) + `holidays_{tenant}` | National holidays (shared), company closures, user absences |
+| **tenants** | 3002 | Platform DB (shared) | Tenant registry, user identities, provisioning |
 | **bootstrap** | 3100 | N/A (RPC client) | Seed data initialization, multi-tenant provisioning |
 
 ## Architecture Diagram
@@ -54,7 +55,8 @@ graph TB
         PA[ProjectAccess :3008]
         GRANTS[Grants :3010]
         ORG[Organization :3012]
-        TENANTS[Tenants :3013]
+        HOLIDAYS[Holidays :3013]
+        TENANTS[Tenants :3002]
     end
 
     subgraph "Infrastructure"
@@ -65,12 +67,13 @@ graph TB
 
     Client -->|HTTPS| GW
     GW -->|Redis RPC| AUTH
-    GW -->|Federation HTTP| AUTH & USERS & PROJECTS & MILESTONES & M2U & M2P & GA & PA & GRANTS & ORG & TENANTS
+    GW -->|Federation HTTP| AUTH & USERS & PROJECTS & MILESTONES & M2U & M2P & GA & PA & GRANTS & ORG & HOLIDAYS & TENANTS
 
     AUTH --> REDIS
     AUTH --> MONGODB
     USERS --> REDIS & MONGODB
     GRANTS --> REDIS & MONGODB
+    HOLIDAYS --> REDIS & MONGODB & PLATFORM_DB
     TENANTS --> PLATFORM_DB
 ```
 

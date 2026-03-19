@@ -1,6 +1,6 @@
 # Projects Service
 
-The Projects service manages **projects**, **project templates**, **template phases**, **template sharing**, and **holiday calendars**. It's one of the richer services with multiple sub-domains.
+The Projects service manages **projects**, **project templates**, **template phases**, and **template sharing**. It's one of the richer services with multiple sub-domains.
 
 ## Overview
 
@@ -8,7 +8,7 @@ The Projects service manages **projects**, **project templates**, **template pha
 |----------|-------|
 | Port | 3003 |
 | Database | `projects_{tenantSlug}` |
-| Collections | `projectdocuments`, `projecttemplates`, `projecttemplatephases`, `projecttemplateshares`, `holidaycalendars` |
+| Collections | `projectdocuments`, `projecttemplates`, `projecttemplatephases`, `projecttemplateshares` |
 | Module | `ProjectsModule` |
 | Context | `ProjectsContext` (request-scoped) |
 
@@ -27,7 +27,7 @@ class Project {
     endDate: string
     status: ProjectStatus        // ACTIVE | COMPLETED | ON_HOLD | ARCHIVED
     excludeWeekends: boolean     // default: false
-    countryCode?: string         // ISO 3166-1 alpha-2 for holiday calendar
+    countryCode?: string         // ISO 3166-1 alpha-2 for holiday calendar lookup
   }
   milestones?: MilestoneToProject[]  // Federation
   tenantId?: string
@@ -65,18 +65,6 @@ class ProjectTemplatePhase {
 }
 ```
 
-### HolidayCalendar
-
-```typescript
-class HolidayCalendar {
-  _id: string
-  countryCode: string
-  countryName: string
-  year: number
-  holidays: [{ date: string, name: string, type: string }]
-}
-```
-
 ## GraphQL Schema
 
 ### Project Queries & Mutations
@@ -110,13 +98,6 @@ class HolidayCalendar {
 | `updateProjectTemplatePhase` | Mutation | `input` | `ProjectTemplatePhase!` |
 | `deleteProjectTemplatePhase` | Mutation | `phaseId: ID!` | `DeleteProjectTemplateOutput!` |
 
-### Holiday Calendar
-
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `holidayCalendars` | Query | `countryCodes: [String]!, startYear: Int!, endYear: Int!` | `[HolidayCalendar]!` |
-| `availableHolidayCountries` | Query | — | `[HolidayCountryOption]!` |
-
 ### ResolveField
 
 | Field | On | Returns | Description |
@@ -137,6 +118,7 @@ class HolidayCalendar {
 | `FIND_PROJECT_TEMPLATE_BY_NAME` | `string` | `ProjectTemplate \| null` | Find template (bootstrap) |
 | `FIND_TEMPLATE_PHASES_BY_TEMPLATE_ID` | `string` | `ProjectTemplatePhase[]` | Get phases (bootstrap) |
 | `CREATE_PROJECT_TEMPLATE_PHASE` | `{templateId, name, orderIndex, ...}` | `ProjectTemplatePhase` | Create phase (bootstrap) |
+| `SEED_PROJECT_TEMPLATES` | — | `void` | Trigger template seeding (called by bootstrap) |
 
 ### Outbound Events
 
@@ -146,16 +128,18 @@ class HolidayCalendar {
 | MilestoneToProject | `PROJECT_UPDATED` | After project update |
 | MilestoneToProject | `PROJECT_DELETED` | After project deletion |
 
-## Module Initialization
+## Template Seeding
 
-The Projects module seeds data on startup:
+The `seedTemplates()` function is now exposed as a `SEED_PROJECT_TEMPLATES` RPC endpoint. The Bootstrap service calls this RPC per tenant to seed default project templates:
 
 ```typescript
-async onModuleInit() {
-  await this.holidayCalendarService.seedHolidays();     // Italian holidays by default
-  await this.projectTemplateService.seedTemplates();     // Default templates from seeds/
+@MessagePattern('SEED_PROJECT_TEMPLATES')
+async seedProjectTemplates() {
+  await this.projectTemplateService.seedTemplates();
 }
 ```
+
+This change allows template seeding to run with proper tenant context, rather than requiring `onModuleInit` to guess the tenant.
 
 ### Template Visibility
 

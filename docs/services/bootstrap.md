@@ -29,6 +29,7 @@ BootstrapModule
     ├── GATEWAY_SERVICE
     ├── ORGANIZATION_SERVICE
     ├── PROJECTS_SERVICE
+    ├── HOLIDAYS_SERVICE
     ├── MILESTONE_TO_PROJECT_SERVICE
     └── TENANTS_SERVICE
 
@@ -105,13 +106,12 @@ Seeds sample milestones.
 
 ### 6. ProjectTemplatesSeeder
 
-Seeds project templates with phases.
+Seeds project templates with phases by calling the Projects service's `SEED_PROJECT_TEMPLATES` RPC.
 
 **RPC calls**:
-- `FIND_PROJECT_TEMPLATE_BY_NAME` → check existence
-- `CREATE_PROJECT_TEMPLATE` → create template
-- `FIND_TEMPLATE_PHASES_BY_TEMPLATE_ID` → check phases
-- `CREATE_PROJECT_TEMPLATE_PHASE` → create phases with roleCategoryId
+- `SEED_PROJECT_TEMPLATES` → triggers template seeding within the Projects service
+
+This approach runs template seeding with proper tenant context. The Projects service handles the idempotent creation of templates and phases internally.
 
 ### 7. DemoProjectSeeder
 

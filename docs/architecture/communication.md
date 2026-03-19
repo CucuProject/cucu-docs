@@ -200,6 +200,7 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 | `CREATE_PROJECT_TEMPLATE` | Message | `{name, description?, scope, createdBy?}` | `ProjectTemplate` | Create template (bootstrap) |
 | `FIND_PROJECT_TEMPLATE_BY_NAME` | Message | `string` | `ProjectTemplate \| null` | Find template |
 | `CREATE_PROJECT_TEMPLATE_PHASE` | Message | `{templateId, name, orderIndex, ...}` | `ProjectTemplatePhase` | Create phase |
+| `SEED_PROJECT_TEMPLATES` | Message | — | `void` | Trigger template seeding (bootstrap) |
 
 ### Organization Service
 
@@ -213,6 +214,18 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 | `CREATE_JOB_ROLE` | Message | `{name, order, description?}` | `JobRole` | Bootstrap seeder |
 | `CREATE_ROLE_CATEGORY` | Message | `{name, description?}` | `RoleCategory` | Bootstrap seeder |
 | Various `FIND_*_BY_NAME` | Message | `string` | entity or null | Bootstrap seeder lookup |
+
+### Holidays Service
+
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `GET_HOLIDAYS` | Message | `{countryCode, year}` | `HolidayCalendar \| null` | Single country/year lookup |
+| `GET_HOLIDAYS_BULK` | Message | `{countryCodes[], startYear, endYear}` | `HolidayCalendar[]` | Multi-country, year-range lookup |
+| `GET_AVAILABLE_COUNTRIES` | Message | — | `{countryCode, countryName}[]` | List seeded countries |
+| `GET_COMPANY_CLOSURES` | Message | `{startDate, endDate}` | `CompanyClosure[]` | Company closures in range (tenant) |
+| `GET_USER_ABSENCES` | Message | `{userId, startDate, endDate}` | `UserAbsence[]` | User absences in range (tenant) |
+| `GET_BUSINESS_DAYS` | Message | `{userId?, countryCode, startDate, endDate}` | `BusinessDay[]` | Calculate business days |
+| `PERMISSIONS_CHANGED` | Event | `{groupIds}` | — | Invalidate permission cache |
 
 ### Tenants Service
 

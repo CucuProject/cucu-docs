@@ -113,6 +113,7 @@ flowchart TD
     subgraph "Phase 4: Domain Services"
         MILESTONES[Milestones :3004]
         PROJECTS[Projects :3003]
+        HOLIDAYS[Holidays :3013]
         GA[GroupAssignments :3007]
         M2U[MilestoneToUser :3005]
         M2P[MilestoneToProject :3006]
@@ -157,15 +158,16 @@ async onModuleInit() {
 
 This pre-introspects the local GraphQL schema to discover all fields — required for the field-level permission system.
 
-### Projects Service
+### Holidays Service
 
 ```typescript
 async onModuleInit() {
   // ... introspection setup ...
-  await this.holidayCalendarService.seedHolidays();     // Seeds holiday data
-  await this.projectTemplateService.seedTemplates();     // Seeds default project templates
+  await this.holidayCalendarService.seedHolidays();     // Seeds national holidays (shared DB)
 }
 ```
+
+The Holidays service seeds national holiday data on startup. Since national holidays are stored in a shared database (not per-tenant), this seeding happens without tenant context.
 
 ### TenantDatabaseModule
 
@@ -194,7 +196,7 @@ flowchart TD
     I --> J[MilestonesSeeder]
     J --> |"CREATE_MILESTONE"| K[Sample milestones]
     K --> L[ProjectTemplatesSeeder]
-    L --> |"CREATE_PROJECT_TEMPLATE, CREATE_PROJECT_TEMPLATE_PHASE"| M[Templates]
+    L --> |"SEED_PROJECT_TEMPLATES RPC"| M[Templates via Projects service]
     M --> N[DemoProjectSeeder]
     N --> |"CREATE_PROJECT, CREATE_MILESTONE_TO_PROJECT"| O[Demo data]
 ```

@@ -1,457 +1,225 @@
 # Users Service
 
-The Users service manages **user profiles, authentication data, and organizational assignments** in the Cucu platform.
+The Users service owns the **User** entity — the central domain object representing people in the system. Users have nested sub-documents for authentication data, personal information, employment details, and organizational metadata.
 
 ## Overview
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3002 |
-| **Database** | users-db (MongoDB, port 9002) |
-| **Role** | User CRUD, profiles, lookup tables |
-| **Dependencies** | Grants |
+| Port | 3002 |
+| Database | `users_{tenantSlug}` |
+| Collection | `users` |
+| Module | `UsersModule` |
+| Context | `UsersContext` (request-scoped) |
 
-## Schema
+### Domain Entities
 
-### User Entity
+| Entity | Description |
+|--------|-------------|
+| `User` | Core user record with nested AuthData, PersonalData, EmploymentData, AdditionalFieldsData |
+| `AuthDataSchema` | Name, surname, email, password (deprecated — now in platform DB), groupIds |
+| `PersonalDataSchema` | Date of birth, place of birth, citizenship, languages |
+| `EmploymentDataSchema` | Employment dates, costs, RAL, rates, location |
+| `AdditionalFieldsDataSchema` | Job roles, seniority level, supervisors, company, active status, avatar color, billable |
+
+## Architecture
+
+### Module Structure
+
+```
+UsersModule
+├── TenantDatabaseModule.forService('users')
+├── ConfigModule (global)
+├── RedisClientsModule
+│   ├── GRANTS_SERVICE
+│   ├── MILESTONE_TO_USER_SERVICE
+│   ├── GROUP_ASSIGNMENTS_SERVICE
+│   ├── AUTH_SERVICE
+│   └── ORGANIZATION_SERVICE
+├── KeycloakM2MModule
+├── MicroservicesOrchestratorModule
+└── GraphQLModule (ApolloFederationDriver)
+    └── orphanedTypes: [JobRole, SeniorityLevel, Company]
+
+Controllers: UsersController
+Resolvers: UsersResolver, AdditionalFieldsResolver
+```
+
+## User Schema
 
 ```typescript
-interface User {
-  _id: ID;
-
-  authData: {
-    name: string;              // Max 100 chars
-    surname: string;           // Max 100 chars
-    email: string;             // Unique, valid email
-    password: string;          // Hashed, NOT exposed via GraphQL
-    groupIds: string[];        // Synced from GroupAssignments
-  };
-
-  personalData?: {
-    dateOfBirth: string;       // ISO 8601, min 16 years old
-    placeOfBirth: string;
-    citizenship: string;
-    languages?: {
-      code: string;            // ISO 639-1 (e.g., "en", "it")
-      level: number;           // 1-5
-    }[];
-    dateOfCreation: string;    // Auto-set if not provided
-  };
-
-  employmentData?: {
-    dateOfEmployment: string;  // ISO 8601
-    endDate?: string;          // Must be after dateOfEmployment
-    companyCosts: number;      // 0-10,000,000
-    RAL: number;               // 0-10,000,000
-    rates?: number;            // 0-10,000, only if billable=true
-    location: string;          // Max 200 chars
-  };
-
-  additionalFieldsData?: {
-    jobRoleIds: string[];      // Max 10 items
-    active: boolean;           // Required
-    seniorityLevelId?: string;
-    supervisorIds?: string[];  // Max 10, validated for circular deps
-    companyId?: string;
-    avatarColor?: number;      // 1-10, auto-assigned
-    billable: boolean;         // Default false
-  };
-
-  // Resolved via field resolvers
-  milestones?: MilestoneToUser[];
-  subordinates?: User[];
-
-  // Audit fields
-  deletedAt?: Date;
-  deletedBy?: string;
-  updatedBy?: string;
-  createdAt: Date;
-  updatedAt: Date;
+@Directive('@key(fields: "_id")')
+@Schema({ timestamps: true })
+class User {
+  _id: string                              // Federation key
+  authData: AuthDataSchema                 // name, surname, email, password (nested)
+  personalData?: PersonalDataSchema        // DOB, citizenship, languages (nested)
+  employmentData?: EmploymentDataSchema    // dates, costs, RAL (nested)
+  additionalFieldsData?: AdditionalFieldsDataSchema  // roles, seniority, supervisors (nested)
+  milestones?: MilestoneToUser[]          // Federation — resolved via RPC
+  subordinates?: User[]                    // Self-reference — supervisor hierarchy
+  tenantId?: string                        // Defence-in-depth
+  deletedAt?: Date                         // Soft delete timestamp
+  deletedBy?: string                       // Who deleted this user
+  updatedBy?: string                       // Last updater
+  createdAt?: Date
+  updatedAt?: Date
 }
 ```
 
-## API Reference
+### Nested Schemas
 
-### GraphQL Queries
-
-#### findAllUsers
-
-```graphql
-query FindAllUsers(
-  $pagination: PaginationInput
-  $filter: UserFilterInput
-  $sort: SortInput
-) {
-  findAllUsers(pagination: $pagination, filter: $filter, sort: $sort) {
-    items {
-      _id
-      authData { name surname email }
-      additionalFieldsData {
-        active
-        seniorityLevel { _id name }
-        jobRoles { _id name }
-        supervisors { _id authData { name } }
-      }
-    }
-    totalCount
-    hasNextPage
-  }
-}
+**AuthDataSchema:**
+```
+name: string (required)
+surname: string (required)
+email: string (required, unique with deletedAt index)
+password: string (required — @deprecated, kept for backward compat)
+groupIds: string[] (virtual — resolved via GroupAssignments RPC)
 ```
 
-**Filter Options:**
-```typescript
-interface UserFilterInput {
-  name?: string;           // Case-insensitive substring
-  surname?: string;        // Case-insensitive substring
-  email?: string;          // Case-insensitive substring
-  active?: boolean;
-  seniorityLevelId?: string;
-  jobRoleIds?: string[];   // Users with any of these roles
-  supervisorId?: string;   // Users with this supervisor
-  groupId?: string;        // Users in this group
-  companyId?: string;
-  search?: string;         // Full-text search across name, surname, email
-}
+**PersonalDataSchema:**
+```
+dateOfBirth?: string
+placeOfBirth?: string
+citizenship?: string
+languages?: [{code: string, level: number}]  // ISO 639-1, proficiency 1-5
+dateOfCreation?: string
 ```
 
-#### findOneUser
-
-```graphql
-query FindOneUser($userId: String!, $includeDeleted: Boolean) {
-  findOneUser(userId: $userId, includeDeleted: $includeDeleted) {
-    _id
-    authData { name surname email }
-    personalData { dateOfBirth citizenship }
-    employmentData { dateOfEmployment location RAL }
-    additionalFieldsData {
-      active
-      billable
-      avatarColor
-    }
-    subordinates { _id authData { name } }
-    milestones { _id startDate endDate }
-  }
-}
+**EmploymentDataSchema:**
+```
+dateOfEmployment?: string
+endDate?: string
+companyCosts?: number
+RAL?: number
+rates?: number
+location?: string
 ```
 
-#### getUserFilterCounts
-
-```graphql
-query {
-  getUserFilterCounts {
-    activeCount
-    inactiveCount
-    totalCount
-    bySeniority { seniorityLevelId count }
-    byJobRole { jobRoleId count }
-    bySupervisor { supervisorId count }
-    byCompany { companyId count }
-  }
-}
+**AdditionalFieldsDataSchema:**
+```
+jobRoleIds: ObjectId[]         → resolved via Federation to JobRole[]
+seniorityLevelId?: ObjectId    → resolved via Federation to SeniorityLevel
+supervisorIds: ObjectId[]      → resolved to User[] via self-query
+companyId?: ObjectId           → resolved via Federation to Company
+active?: boolean
+avatarColor?: number           // 1-10, assigned at creation
+billable: boolean              // default: false
 ```
 
-### GraphQL Mutations
+### Indexes
 
-#### createUser
+| Fields | Type | Purpose |
+|--------|------|---------|
+| `{additionalFieldsData.supervisorIds, deletedAt}` | Compound | Subordinate queries |
+| `{authData.groupIds, deletedAt}` | Compound | Filter by group |
+| `{authData.email, deletedAt}` | Compound unique | Email uniqueness |
 
-```graphql
-mutation CreateUser($input: CreateUserInput!) {
-  createUser(createUserInput: $input) {
-    _id
-    authData { name email }
-  }
-}
-```
+## GraphQL Schema
 
-**Input:**
-```json
-{
-  "input": {
-    "authData": {
-      "name": "John",
-      "surname": "Doe",
-      "email": "john.doe@example.com",
-      "password": "SecurePass123!"
-    },
-    "personalData": {
-      "dateOfBirth": "1990-05-15",
-      "placeOfBirth": "Rome",
-      "citizenship": "Italian"
-    },
-    "employmentData": {
-      "dateOfEmployment": "2023-01-01",
-      "location": "Milan"
-    },
-    "additionalFieldsData": {
-      "active": true,
-      "seniorityLevelId": "seniority-123",
-      "jobRoleIds": ["role-456"]
-    }
-  }
-}
-```
+### Queries
 
-#### updateUser
+| Query | Args | Return | Description |
+|-------|------|--------|-------------|
+| `findAllUsers` | `pagination?, filter?: UserFilterInput, sort?: SortInput` | `PaginatedUsers!` | List users with optional filtering/pagination |
+| `findOneUser` | `userId: ID!, includeDeleted?: Boolean` | `User!` | Get single user. `@ScopeCapable('userId')` — scope=SELF restricts to own profile |
+| `getUserFilterCounts` | — | `UserFilterCounts!` | Aggregated counts for filter sidebar (status, seniority, jobRole, supervisor, company) |
+| `findDeletedUsers` | `filter?, sort?` | `PaginatedUsers!` | List soft-deleted users |
 
-```graphql
-mutation UpdateUser($input: UpdateUserInput!) {
-  updateUser(updateUserInput: $input) {
-    _id
-    authData { name email }
-  }
-}
-```
+### Mutations
 
-**Note:** This mutation is **scope-aware**. Users with `scope: 'self'` can only update their own record.
+| Mutation | Args | Return | Description |
+|----------|------|--------|-------------|
+| `createUser` | `createUserInput: CreateUserInput!` | `User!` | Create user. Emits USER_CREATED to M2U + GA |
+| `updateUser` | `updateUserInput: UpdateUserInput!` | `User!` | Update user. `@ScopeCapable('updateUserInput._id')`. Emits USER_UPDATED to M2U + GA |
+| `removeUser` | `userId: ID!` | `DeleteUserOutput!` | Soft delete. Anti-self-delete guard. Emits USER_DELETED to Auth + M2U + GA |
+| `restoreUser` | `userId: ID!` | `User!` | Restore soft-deleted user |
+| `hardDeleteUser` | `userId: ID!` | `DeleteUserOutput!` | Permanent deletion |
 
-#### removeUser (Soft Delete)
+### ResolveField
 
-```graphql
-mutation RemoveUser($userId: String!) {
-  removeUser(userId: $userId) {
-    name
-    surname
-  }
-}
-```
+| Field | On | Returns | Description |
+|-------|-----|---------|-------------|
+| `subordinates` | `User` | `[User]` | Users where `supervisorIds` contains this user's `_id`. `@CheckFieldView` enforced |
+| `milestones` | `User` | `[MilestoneToUser]` | Federation stubs via `FIND_MILESTONE_TO_USER_BY_USER_ID` RPC |
+| `groupIds` | `AuthDataSchema` | `[ID]` | Live group IDs via `FIND_GROUP_ASSIGNMENTS_BY_USER_ID` RPC |
 
-#### restoreUser
+### Federation
 
-```graphql
-mutation RestoreUser($userId: String!) {
-  restoreUser(userId: $userId) {
-    _id
-    authData { name }
-    deletedAt
-  }
-}
-```
-
-#### hardDeleteUser
-
-```graphql
-mutation HardDeleteUser($userId: String!) {
-  hardDeleteUser(userId: $userId) {
-    name
-    surname
-  }
-}
-```
+- `@ResolveReference()` — resolves `User` entity by `_id`
+- **orphanedTypes**: `JobRole`, `SeniorityLevel`, `Company` (stubs for organization entities)
 
 ## RPC Patterns
 
-### Message Patterns
+### MessagePattern Handlers
 
-| Pattern | Payload | Response |
-|---------|---------|----------|
-| `USER_EXISTS` | `userId: string` | `boolean` |
-| `CREATE_USER` | `CreateUserInput` | `User` |
-| `FIND_USER_BY_EMAIL` | `{ email, forAuth? }` | `{ _id, password?, groupIds }` or `null` |
-| `FIND_USER_WITH_PASSWORD` | `{ userId }` | `{ _id, password }` or `null` |
-| `UPDATE_USER` | `UpdateUserInput` | `User` |
-| `UPDATE_USER_PASSWORD` | `{ userId, newPassword }` | `void` |
-| `FIND_GROUPIDS_BY_USERID` | `{ userId }` | `{ groupIds: string[] }` |
-| `GET_ORG_ENTITY_USAGE_COUNT` | `{ field, id }` | `number` |
+| Pattern | Input | Output | Purpose |
+|---------|-------|--------|---------|
+| `USER_EXISTS` | `string \| {id}` | `boolean` | Check if user exists |
+| `CREATE_USER` | `CreateUserInput` | `User` | Create user (bootstrap) |
+| `FIND_USER_BY_EMAIL` | `{email, forAuth?}` | `{_id, password?, groupIds} \| null` | Find by email. `forAuth=true` returns password hash (deprecated) |
+| `FIND_USER_WITH_PASSWORD` | `{userId}` | `{_id, password, email} \| null` | Get password hash (for changePassword) |
+| `UPDATE_USER` | `UpdateUserInput` | `User` | Update user (bootstrap) |
+| `UPDATE_USER_PASSWORD` | `{userId, newPasswordHash}` | void | Update password hash (pre-hashed) |
+| `FIND_GROUPIDS_BY_USERID` | `{userId}` | `{groupIds: string[]}` | Get group IDs for a user |
+| `GET_ORG_ENTITY_USAGE_COUNT` | `{field, id}` | `number` | Count users referencing a lookup entity |
 
-### Event Patterns
+### EventPattern Handlers
 
-| Pattern | Payload | Source |
-|---------|---------|--------|
-| `USER_GROUPS_CHANGED` | `{ userId }` | GroupAssignments |
-| `PERMISSIONS_CHANGED` | `{ groupIds }` | Grants |
+| Pattern | Input | Action |
+|---------|-------|--------|
+| `USER_DELETED` | `{userId}` | No-op (service already notified dependents directly) |
+| `USER_GROUPS_CHANGED` | `{userId}` | Sync `authData.groupIds` in user document from GroupAssignments |
+| `PERMISSIONS_CHANGED` | `{groupIds}` | Invalidate local permission cache |
 
-## Business Rules
+### Outbound Events
 
-### Validation Rules
+| Target | Pattern | When |
+|--------|---------|------|
+| Auth | `USER_DELETED` | After soft/hard delete |
+| MilestoneToUser | `USER_CREATED`, `USER_UPDATED`, `USER_DELETED`, `USER_HARD_DELETED` | After CRUD |
+| GroupAssignments | `USER_CREATED`, `USER_UPDATED`, `USER_DELETED`, `USER_HARD_DELETED` | After CRUD |
 
-| Rule | Description |
-|------|-------------|
-| **Minimum Age** | User must be at least 16 years old |
-| **Employment Date** | Must be at least 16 years after birth date |
-| **End Date** | Must be after employment date |
-| **Rates** | Only allowed when `billable: true` |
-| **Supervisor Chain** | No self-reference, no circular dependencies (10 levels max) |
-| **Email Uniqueness** | Unique across non-deleted users |
+## Business Logic
 
-### Soft Delete Behavior
-
-- Sets `deletedAt` timestamp
-- Sets `active: false`
-- Emits `USER_DELETED` event
-- Sessions are revoked
-- Assignments are cleaned up by downstream services
-
-### Deactivation Rules
-
-- Cannot deactivate a user with subordinates
-- Deactivated users can only be reactivated
-- Sessions are revoked on deactivation
-
-## Scope-Aware Operations
-
-The Users service implements scope-aware field filtering:
+### Soft Delete
 
 ```typescript
-// Resolver with scope enforcement
-@ScopeCapable('userId')
-@UseGuards(ScopeGuard)
-@UseInterceptors(createViewFieldsInterceptor(['User']))
-@Query(() => User)
-async findOneUser(
-  @Args('userId') userId: string,
-  @ViewableFields('User') viewable: Set<string>,
-): Promise<User>
-```
-
-When a user has `scope: 'self'` for an operation:
-- They can only access their own record
-- Attempting to access another user's record throws `ForbiddenException`
-
-Field-level scoping works similarly:
-- Fields with `scope: 'self'` are only visible on the user's own record
-- When viewing another user, self-scoped fields are excluded
-
-## Field Resolvers
-
-### subordinates
-
-Returns users who have this user as a supervisor:
-
-```typescript
-@ResolveField(() => [User])
-async subordinates(@Parent() user: User): Promise<User[]> {
-  return this.usersService.findSubordinates(user._id);
+async remove(userId: string, viewable?: Set<string>, requestUserId?: string) {
+  // 1. Find user, throw if not found
+  // 2. Set deletedAt = now, deletedBy = requestUserId
+  // 3. Set additionalFieldsData.active = false
+  // 4. Emit USER_DELETED to auth, mt2u, ga
+  // 5. Return deleted user (with field projection)
 }
 ```
 
-### milestones
-
-Fetches milestone assignments via RPC:
+### Anti-Self-Delete
 
 ```typescript
-@ResolveField(() => [MilestoneToUser])
-async milestones(@Parent() user: User): Promise<MilestoneToUser[]> {
-  const rows = await lastValueFrom(
-    this.milestoneToUserClient.send(
-      'FIND_MILESTONE_TO_USER_BY_USER_ID',
-      user._id
-    )
-  );
-  return rows.map(r => ({ __typename: 'MilestoneToUser', _id: r._id }));
+if (requestUserId && requestUserId === userId) {
+  throw new ForbiddenException('You cannot delete your own account');
 }
 ```
 
-### groupIds
+### Supervisor Hierarchy
 
-Fetches group IDs from GroupAssignments service:
+Users can have multiple supervisors via `additionalFieldsData.supervisorIds`. The `subordinates` ResolveField queries users where `supervisorIds` contains the parent user's `_id`.
 
-```typescript
-@ResolveField(() => [ID])
-async groupIds(@Parent() auth: AuthDataSchema): Promise<string[]> {
-  const assignments = await lastValueFrom(
-    this.groupAssignmentsClient.send(
-      'FIND_GROUP_ASSIGNMENTS_BY_USER_ID',
-      auth._userId
-    )
-  );
-  return assignments.map(a => a.groupId);
-}
-```
+### AdditionalFieldsResolver
 
-## Configuration
+Resolves organization references on `AdditionalFieldsDataSchema`:
+- `seniorityLevel` → `{ __typename: 'SeniorityLevel', _id: data.seniorityLevelId }`
+- `jobRoles` → `data.jobRoleIds.map(id => ({ __typename: 'JobRole', _id: id }))`
+- `company` → `{ __typename: 'Company', _id: data.companyId }`
+- `supervisors` → Direct DB query for users by IDs (same service)
 
-### Environment Variables
+### User Filter Counts
 
-```ini
-# Service Config
-USERS_SERVICE_NAME=users
-USERS_SERVICE_PORT=3002
-USERS_DB_HOST=users-db
-USERS_DB_PORT=9002
-
-# MongoDB
-MONGODB_URI=mongodb://users-db:27017/users
-
-# Dependencies
-USERS_DEPENDENCIES=["grants"]
-
-# Redis
-REDIS_SERVICE_HOST=redis
-REDIS_SERVICE_TLS_PORT=6380
-```
-
-### Database Indexes
-
-```typescript
-UserSchema.index({ 'authData.email': 1, deletedAt: 1 }, { unique: true });
-UserSchema.index({ 'additionalFieldsData.supervisorIds': 1, deletedAt: 1 });
-UserSchema.index({ 'authData.groupIds': 1, deletedAt: 1 });
-```
-
-## Events Emitted
-
-### USER_CREATED
-
-```typescript
-this.milestoneToUserClient.emit('USER_CREATED', {
-  userId: user._id,
-  milestoneIds: input.assignedMilestoneIds,
-});
-
-this.groupAssignmentsClient.emit('USER_CREATED', {
-  userId: user._id,
-  groupIds: input.authData.groupIds,
-});
-```
-
-### USER_UPDATED
-
-```typescript
-this.milestoneToUserClient.emit('USER_UPDATED', {
-  userId: user._id,
-  milestoneIds: input.assignedMilestoneIds,
-});
-```
-
-### USER_DELETED
-
-```typescript
-this.authClient.emit('USER_DELETED', { userId });
-this.milestoneToUserClient.emit('USER_DELETED', { userId });
-this.groupAssignmentsClient.emit('USER_DELETED', { userId });
-```
-
-## File Structure
-
-```
-apps/users/
-├── src/
-│   ├── main.ts
-│   ├── users.module.ts
-│   ├── users.controller.ts        # RPC handlers
-│   ├── users.resolver.ts          # GraphQL queries/mutations
-│   ├── users.service.ts           # Business logic
-│   ├── users.context.ts           # Subgraph context
-│   ├── schemas/
-│   │   └── user.schema.ts         # Mongoose schema
-│   ├── entities/
-│   │   ├── user.entity.ts         # GraphQL types
-│   │   ├── job-role.entity.ts     # Federation stub
-│   │   ├── seniority-level.entity.ts
-│   │   └── company.entity.ts
-│   ├── dto/
-│   │   ├── create-user.input.ts
-│   │   ├── update-user.input.ts
-│   │   └── user-filter.input.ts
-│   └── resolvers/
-│       └── additional-fields.resolver.ts
-├── Dockerfile
-└── README.md
-```
-
-## Next Steps
-
-- [Grants Service](/services/grants) - Permission management
-- [Permission System](/architecture/permissions) - How permissions apply to users
-- [Add New Field Guide](/guides/add-new-field) - Adding fields to User
+Single MongoDB aggregation that returns counts for the filter sidebar:
+- Active/inactive/deleted counts
+- Count per seniority level
+- Count per job role
+- Count per supervisor
+- Count per company

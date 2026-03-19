@@ -1,445 +1,205 @@
 # Auth Service
 
-The Auth service manages **sessions, JWT tokens, and authentication** for the Cucu platform.
+The Auth service manages **server-side sessions**, **JWT token issuance**, and **refresh token rotation**. It stores sessions in a per-tenant MongoDB database and caches group IDs in Redis.
 
 ## Overview
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3001 |
-| **Database** | auth-db (MongoDB, port 9001) |
-| **Role** | Session management, JWT issuance, token refresh |
-| **Dependencies** | Users |
+| Port | 3001 |
+| Database | `auth_{tenantSlug}` |
+| Collection | `sessions` |
+| Module | `AuthModule` |
+| Context | `AuthContext` (request-scoped) |
 
-## Schema
+### Domain Entities
 
-### Session
+| Entity | Description |
+|--------|-------------|
+| `Session` | Server-side session record with device info, tokens, and timestamps |
 
-```typescript
-interface Session {
-  _id: ID;
-  userId: string;           // Reference to User
-  deviceName: string;       // e.g., "Chrome on Windows"
-  browserName: string;      // e.g., "Chrome"
-  ip: string;               // Client IP address
-  deviceFingerprint: string; // Client fingerprint
-  refreshToken: string;     // Unique refresh token
-  lastActivity: Date;       // Updated on each request
-  expiresAt: Date;          // Maximum session lifetime
-  revokedAt: Date | null;   // Set when session is revoked
-  createdAt: Date;
-  updatedAt: Date;
-}
+## Architecture
+
+### Module Structure
+
+```
+AuthModule
+├── TenantDatabaseModule.forService('auth')
+├── ConfigModule (global)
+├── RedisClientsModule
+│   ├── USERS_SERVICE
+│   ├── GRANTS_SERVICE
+│   └── TENANTS_SERVICE
+├── KeycloakM2MModule
+├── MicroservicesOrchestratorModule
+├── ThrottlerModule (5 req/15min per IP)
+├── CacheModule (Redis-backed, DB=1, TTL=1h)
+├── GraphQLModule (ApolloFederationDriver)
+└── JwtModule (JWT_SECRET, JWT_EXPIRES_IN)
+
+Controller: AuthController (RPC handlers)
+Providers:
+├── AuthContext (SUBGRAPH_CONTEXT)
+├── AuthService
+├── AuthResolver
+├── LocalSchemaFieldsService
+├── PermissionsCacheService
+├── AuthThrottlerGuard (APP_GUARD)
+├── OperationGuard (APP_GUARD)
+└── ViewFieldsInterceptor (APP_INTERCEPTOR for Session)
 ```
 
-## API Reference
+### Redis Cache
 
-### GraphQL Operations
+The Auth service uses a dedicated Redis database (DB=1) for caching group IDs:
 
-#### Queries
-
-```graphql
-# List all sessions (admin use)
-query {
-  findAllSessions {
-    _id
-    userId
-    deviceName
-    browserName
-    ip
-    createdAt
-    lastActivity
-    revokedAt
-  }
-}
-
-# Find sessions for current user
-query {
-  findUserSessions {
-    _id
-    deviceName
-    browserName
-    ip
-    createdAt
-    lastActivity
-  }
-}
+```
+Key: groups:{userId}
+Value: string[] (JSON)
+TTL: 3600 seconds (1 hour)
 ```
 
-#### Mutations
+## GraphQL Schema
 
-```graphql
-# Logout current session
-mutation Logout($input: LogoutInput!) {
-  logout(input: $input)
-}
+### Queries
 
-# Variables
-{
-  "input": { "sessionId": "6460b2f7..." }
-}
+| Query | Args | Return | Description |
+|-------|------|--------|-------------|
+| `findAllSessions` | — | `[Session]!` | Returns all sessions for the current authenticated user |
+| `findSessionsByUserId` | `userId: ID!` | `[Session]!` | Returns active sessions for a specific user. Scope enforcement: `self` scope restricts to own sessions only |
 
-# Revoke specific session
-mutation RevokeSession($input: RevokeSessionInput!) {
-  revokeSession(input: $input)
-}
+### Mutations
 
-# Revoke all sessions for a user
-mutation RevokeUserSessions($userId: String) {
-  revokeUserSessions(userId: $userId)
-}
-```
+| Mutation | Args | Return | Description |
+|----------|------|--------|-------------|
+| `logout` | `input: LogoutInput!` | `Boolean!` | Revoke a single session by sessionId |
+| `revokeSession` | `input: RevokeSessionInput!` | `Boolean!` | Revoke a session. Scope: `self` requires own session |
+| `revokeUserSessions` | `userId: ID` | `Boolean!` | Revoke all active sessions for a user (nullable userId defaults to self) |
+| `changePassword` | `currentPassword: String!, newPassword: String!` | `Boolean!` | Change password, revoke all sessions, sync to platform DB |
+
+### ResolveField
+
+| Field | On | Returns | Description |
+|-------|-----|---------|-------------|
+| `user` | `Session` | `User` (federation stub) | Returns `{ __typename: 'User', _id: session.userId }` |
 
 ## RPC Patterns
 
-### Message Patterns
+### MessagePattern (Request-Response)
 
-| Pattern | Payload | Response |
-|---------|---------|----------|
-| `LOGIN` | `{ email, password, ip, deviceName, browserName, deviceFingerprint }` | `{ accessToken, refreshToken, userId, sessionId, expiresIn }` |
-| `CHECK_SESSION` | `{ sessionId }` | `{ isValid, userId?, groupIds?, reason? }` |
-| `REFRESH_SESSION` | `{ refreshToken }` | `{ accessToken, newRefreshToken, userId, sessionId, expiresIn }` |
-| `REVOKE_SESSION` | `{ sessionId, requestUserId, force }` | `void` |
+| Pattern | Input | Output | Description |
+|---------|-------|--------|-------------|
+| `LOGIN` | `{email, password, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | **Deprecated** — legacy login via tenant DB |
+| `CREATE_AUTHENTICATED_SESSION` | `{userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Create/reuse session after platform DB verification |
+| `CHECK_SESSION` | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session (called on every request) |
+| `REFRESH_SESSION` | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Rotate tokens |
+| `REVOKE_SESSION` | `{sessionId, requestUserId, force}` | void | Revoke single session |
+| `SWITCH_SESSION_TENANT` | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch |
 
-### Event Patterns
+### EventPattern (Fire-and-Forget)
 
-| Pattern | Payload | Purpose |
-|---------|---------|---------|
-| `USER_DELETED` | `{ userId }` | Revoke all sessions for deleted user |
-| `REVOKE_ALL_SESSIONS` | `{ userId }` | Revoke all sessions for user (e.g., password change) |
+| Pattern | Input | Action |
+|---------|-------|--------|
+| `USER_DELETED` | `{userId}` | Revoke all sessions + clear group cache |
+| `REVOKE_ALL_SESSIONS` | `{userId}` | Revoke all sessions + clear group cache |
 
-## Implementation Details
+### Outbound RPC Calls
 
-### Login Process
+| Target | Pattern | Purpose |
+|--------|---------|---------|
+| Users | `FIND_GROUPIDS_BY_USERID` | Load group IDs for JWT claims (cache miss) |
+| Users | `FIND_USER_BY_EMAIL` | Legacy login — find user with password |
+| Users | `FIND_USER_WITH_PASSWORD` | Change password — get current hash |
+| Users | `UPDATE_USER_PASSWORD` | Change password — update tenant DB |
+| Tenants | `UPDATE_IDENTITY_PASSWORD` | Change password — sync to platform DB |
+
+## Session Schema
 
 ```typescript
-// apps/auth/src/auth.service.ts
-async login(data: LoginPayload): Promise<LoginResponse> {
-  // 1. Find user by email
-  const user = await lastValueFrom(
-    this.usersClient.send('FIND_USER_BY_EMAIL', {
-      email: data.email,
-      forAuth: true,
-    })
-  );
-
-  if (!user) {
-    throw new UnauthorizedException('Invalid credentials');
-  }
-
-  // 2. Verify password with bcrypt
-  const passwordValid = await bcrypt.compare(data.password, user.password);
-  if (!passwordValid) {
-    throw new UnauthorizedException('Invalid credentials');
-  }
-
-  // 3. Get group IDs (with caching)
-  let groupIds = await this.cacheManager.get<string[]>(`groups:${user._id}`);
-  if (!groupIds) {
-    const result = await lastValueFrom(
-      this.usersClient.send('FIND_GROUPIDS_BY_USERID', { userId: user._id })
-    );
-    groupIds = result.groupIds;
-    await this.cacheManager.set(`groups:${user._id}`, groupIds, 3600000);
-  }
-
-  // 4. Create session document
-  const refreshToken = this.generateRefreshToken();
-  const session = await this.sessionModel.create({
-    userId: user._id,
-    deviceName: data.deviceName,
-    browserName: data.browserName,
-    ip: data.ip,
-    deviceFingerprint: data.deviceFingerprint,
-    refreshToken,
-    lastActivity: new Date(),
-    expiresAt: new Date(Date.now() + parseDuration(this.maxSessionAge)),
-  });
-
-  // 5. Sign JWT access token
-  const accessToken = this.jwtService.sign({
-    sub: user._id,
-    sessionId: session._id.toString(),
-    groups: groupIds,
-  });
-
-  return {
-    accessToken,
-    refreshToken,
-    userId: user._id,
-    sessionId: session._id.toString(),
-    expiresIn: parseDuration(this.accessTokenExpiresIn) / 1000,
-  };
+Session {
+  _id: ObjectId           // Pre-generated for JWT embedding
+  userId: string          // @Field
+  refreshToken: string    // NOT exposed via GraphQL
+  deviceFingerprint: string // NOT exposed via GraphQL
+  createdAt?: Date        // @Field(nullable)
+  updatedAt?: Date        // @Field(nullable)
+  revokedAt?: Date        // @Field(nullable) — set when revoked
+  ip?: string             // @Field(nullable)
+  deviceName?: string     // @Field(nullable) — e.g., "macOS 14.3"
+  browserName?: string    // @Field(nullable) — e.g., "Chrome 134"
+  expiresAt?: Date        // @Field(nullable) — refresh token expiry
+  sessionStart: Date      // @Field — when session was first created
+  lastActivity: Date      // @Field — updated on CHECK_SESSION
+  tenantId?: string       // Defence-in-depth (not exposed)
 }
 ```
 
-### Session Validation
+### Indexes
+
+| Fields | Type | Purpose |
+|--------|------|---------|
+| `{userId, ip, deviceFingerprint, revokedAt}` | Compound | Session reuse lookup |
+| `{userId, revokedAt}` | Compound | Session listing + batch revocation |
+
+## Business Logic
+
+### Session Reuse
+
+Sessions are identified by `(userId, ip, deviceFingerprint)`. If a valid session exists for this triple, it's reused instead of creating a new one. This prevents session explosion from page reloads.
+
+### Token Pre-generation
+
+The session `_id` is pre-generated as `new Types.ObjectId()` before the JWT is signed. This allows the `sessionId` to be embedded in the JWT **before** the session document is saved to MongoDB — ensuring atomicity.
+
+### Group ID Caching
+
+Group IDs are cached in Redis (DB=1, TTL=1h) to avoid RPC calls to Users on every request:
+
+```
+1. Check cache: groups:{userId}
+2. Cache hit → return cached groupIds
+3. Cache miss → RPC FIND_GROUPIDS_BY_USERID → cache result → return
+```
+
+Cache is invalidated when:
+- User is deleted (`revokeAllSessionsOfUser` calls `cacheManager.del`)
+- Password is changed (all sessions revoked + cache cleared)
+
+### Password Change Flow
+
+1. `FIND_USER_WITH_PASSWORD` RPC → get current hash + email
+2. `bcrypt.compare(currentPassword, hash)` — verify current
+3. `bcrypt.hash(newPassword)` → generate new hash
+4. `UPDATE_USER_PASSWORD` → update tenant DB (backward compat)
+5. `UPDATE_IDENTITY_PASSWORD` → update platform DB (source of truth)
+6. Revoke all active sessions → force re-login
+
+### Throttling
+
+The `AuthThrottlerGuard` applies rate limiting specifically to the Auth service:
+- **5 requests per 15 minutes** per IP (configurable via `AUTH_THROTTLE_TTL`, `AUTH_THROTTLE_LIMIT`)
+- All RPC handlers are decorated with `@SkipThrottle()` — only GraphQL/HTTP is throttled
+
+## Field-Level Permissions
+
+The Auth service applies field filtering on the `Session` entity:
 
 ```typescript
-async checkSessionValidity(sessionId: string): Promise<CheckSessionResponse> {
-  const session = await this.sessionModel.findById(sessionId).lean();
-
-  // Session not found
-  if (!session) {
-    return { isValid: false, reason: 'Session not found' };
-  }
-
-  // Session was revoked
-  if (session.revokedAt) {
-    return { isValid: false, reason: 'Session revoked' };
-  }
-
-  const now = new Date();
-
-  // Check maximum session age
-  if (session.expiresAt && session.expiresAt < now) {
-    return { isValid: false, reason: 'Session expired' };
-  }
-
-  // Check idle timeout
-  const idleTimeout = parseDuration(this.sessionIdleTimeout);
-  const idleDeadline = new Date(session.lastActivity.getTime() + idleTimeout);
-  if (idleDeadline < now) {
-    // Auto-revoke idle sessions
-    await this.sessionModel.updateOne(
-      { _id: sessionId },
-      { revokedAt: now }
-    );
-    return { isValid: false, reason: 'Session idle timeout' };
-  }
-
-  // Update last activity
-  await this.sessionModel.updateOne(
-    { _id: sessionId },
-    { lastActivity: now }
-  );
-
-  // Get fresh group IDs
-  const groupIds = await this.getGroupIds(session.userId);
-
-  return {
-    isValid: true,
-    userId: session.userId,
-    groupIds,
-  };
+@UseInterceptors(createViewFieldsInterceptor(['Session']))
+@Query(() => [Session])
+async findAllSessions(@ViewableFields('Session') viewable: Set<string>) {
+  return this.authService.findAllSessions(viewable);
 }
 ```
 
-### Token Refresh
+The service builds a Mongoose projection from viewable fields:
 
 ```typescript
-async refreshSession(refreshToken: string): Promise<RefreshResponse> {
-  // 1. Find session by refresh token
-  const session = await this.sessionModel.findOne({
-    refreshToken,
-    revokedAt: null,
-  });
-
-  if (!session) {
-    throw new UnauthorizedException('Invalid refresh token');
-  }
-
-  // 2. Check session is still valid
-  if (session.expiresAt && session.expiresAt < new Date()) {
-    throw new UnauthorizedException('Session expired');
-  }
-
-  // 3. Rotate refresh token
-  const newRefreshToken = this.generateRefreshToken();
-  session.refreshToken = newRefreshToken;
-  session.lastActivity = new Date();
-  await session.save();
-
-  // 4. Get fresh group IDs
-  const groupIds = await this.getGroupIds(session.userId);
-
-  // 5. Sign new access token
-  const accessToken = this.jwtService.sign({
-    sub: session.userId,
-    sessionId: session._id.toString(),
-    groups: groupIds,
-  });
-
-  return {
-    accessToken,
-    newRefreshToken,
-    userId: session.userId,
-    sessionId: session._id.toString(),
-    expiresIn: parseDuration(this.accessTokenExpiresIn) / 1000,
-  };
+private getViewableProjection(entity: string, viewable?: Set<string>): any {
+  if (viewable && viewable.size > 0) return buildMongooseProjection(viewable);
+  if (this.actx?.isInternalCall() && !this.actx?.hasUserContext()) return undefined;
+  const set = this.permCache.getViewableFieldsForEntity(entity);
+  if (!set.size) throw new ForbiddenException('No viewable fields');
+  return buildMongooseProjection(set);
 }
 ```
-
-### Session Revocation
-
-```typescript
-async revokeSession(
-  sessionId: string,
-  requestUserId: string,
-  force: boolean
-): Promise<void> {
-  const session = await this.sessionModel.findById(sessionId);
-
-  if (!session) {
-    throw new NotFoundException('Session not found');
-  }
-
-  // Non-forced revocation must be own session
-  if (!force && session.userId !== requestUserId) {
-    throw new ForbiddenException('Cannot revoke another user\'s session');
-  }
-
-  session.revokedAt = new Date();
-  await session.save();
-}
-
-async revokeAllSessionsOfUser(userId: string): Promise<void> {
-  await this.sessionModel.updateMany(
-    { userId, revokedAt: null },
-    { revokedAt: new Date() }
-  );
-}
-```
-
-## Configuration
-
-### Environment Variables
-
-```ini
-# Service Config
-AUTH_SERVICE_NAME=auth
-AUTH_SERVICE_PORT=3001
-AUTH_DB_HOST=auth-db
-AUTH_DB_PORT=9001
-
-# MongoDB
-MONGODB_URI=mongodb://auth-db:27017/auth
-
-# JWT Settings
-JWT_SECRET=ProdSecretKey
-JWT_EXPIRES_IN=15m
-ACCESS_TOKEN_EXPIRES_IN=1h
-
-# Session Settings
-REFRESH_EXPIRES_IN=7d
-SESSION_IDLE_TIMEOUT=4h
-MAX_SESSION_AGE=24h
-
-# Redis Cache
-REDIS_SERVICE_HOST=redis
-REDIS_SERVICE_TLS_PORT=6380
-```
-
-### JWT Configuration
-
-```typescript
-// apps/auth/src/auth.module.ts
-JwtModule.registerAsync({
-  imports: [ConfigModule],
-  inject: [ConfigService],
-  useFactory: (configService: ConfigService) => ({
-    secret: configService.get('JWT_SECRET'),
-    signOptions: {
-      expiresIn: configService.get('JWT_EXPIRES_IN', '15m'),
-    },
-  }),
-})
-```
-
-## Security Features
-
-### 1. Password Handling
-
-- Passwords are hashed with bcrypt (salt rounds: 10)
-- Raw passwords are never logged or stored
-- Password verification uses constant-time comparison
-
-### 2. Session Security
-
-- Sessions stored server-side in MongoDB
-- Validated on every request (not just JWT)
-- Automatic idle timeout and max age
-- Immediate revocation capability
-
-### 3. Token Security
-
-- JWT contains minimal claims (userId, sessionId, groups)
-- Short expiry (15 minutes default)
-- Refresh tokens are unique per session
-- Refresh rotation prevents replay attacks
-
-### 4. Device Tracking
-
-- Session records device info
-- Users can see active sessions
-- Suspicious sessions can be revoked
-
-## Event Handling
-
-### USER_DELETED Event
-
-```typescript
-// apps/auth/src/auth.controller.ts
-@EventPattern('USER_DELETED')
-async handleUserDeleted(@Payload() data: { userId: string }) {
-  this.logger.log(`USER_DELETED received for userId=${data.userId}`);
-  await this.authService.revokeAllSessionsOfUser(data.userId);
-}
-```
-
-### REVOKE_ALL_SESSIONS Event
-
-```typescript
-@EventPattern('REVOKE_ALL_SESSIONS')
-async handleRevokeAllSessions(@Payload() data: { userId: string }) {
-  this.logger.log(`REVOKE_ALL_SESSIONS received for userId=${data.userId}`);
-  await this.authService.revokeAllSessionsOfUser(data.userId);
-}
-```
-
-## File Structure
-
-```
-apps/auth/
-├── src/
-│   ├── main.ts
-│   ├── auth.module.ts
-│   ├── auth.controller.ts       # RPC handlers
-│   ├── auth.resolver.ts         # GraphQL mutations
-│   ├── auth.service.ts          # Business logic
-│   ├── schemas/
-│   │   └── session.schema.ts    # Mongoose schema
-│   ├── entities/
-│   │   └── session.entity.ts    # GraphQL type
-│   └── dto/
-│       ├── login.input.ts
-│       ├── logout.input.ts
-│       └── revoke-session.input.ts
-├── Dockerfile
-└── README.md
-```
-
-## Troubleshooting
-
-### "Session not found"
-
-1. Check sessionId is correct
-2. Verify session hasn't been revoked
-3. Check MongoDB connectivity
-
-### "Session idle timeout"
-
-1. Session was inactive too long (default 4h)
-2. User needs to re-authenticate
-
-### "Invalid refresh token"
-
-1. Token may have been rotated already
-2. Session may have been revoked
-3. Check cookie is being sent correctly
-
-## Next Steps
-
-- [Users Service](/services/users) - User management
-- [Authentication Flow](/architecture/auth-flow) - End-to-end auth
-- [Gateway](/services/gateway) - Entry point that calls Auth

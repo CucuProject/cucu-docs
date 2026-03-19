@@ -1,160 +1,215 @@
-# System Overview
+# System Architecture Overview
 
-The Cucu platform is a distributed microservices architecture built on NestJS with Apollo Federation 2.
+The Cucu platform is a **multi-tenant, distributed microservices architecture** built on NestJS with Apollo Federation 2. It implements a project management and resource allocation system with fine-grained permission control and complete tenant isolation at the database level.
+
+## Design Principles
+
+1. **Physical Database Isolation** — each tenant gets a separate MongoDB database per service (e.g., `users_acme`, `grants_acme`), not just a filter column
+2. **Single Entry Point** — all client traffic flows through the Gateway, which validates JWT tokens and forwards signed headers to subgraphs
+3. **Federation over Monolith** — GraphQL schema is distributed across services via Apollo Federation 2; each service owns its domain entities
+4. **Event-Driven Side Effects** — state changes propagate via Redis pub/sub events (fire-and-forget), while queries use request-response RPC
+5. **Permission as Data** — operation-level, field-level, and page-level permissions are stored in the Grants service and enforced at every subgraph
 
 ## Service Inventory
 
-| Service | Port | DB Port | Purpose |
-|---------|------|---------|---------|
-| **gateway** | 3000 | N/A | Apollo Federation gateway, authentication entry point |
-| **auth** | 3001 | 9001 | Session management, JWT tokens, refresh tokens |
-| **users** | 3002 | 9002 | User CRUD, profiles, lookup tables |
-| **projects** | 3003 | 9003 | Project management, status lifecycle |
-| **milestones** | 3004 | 9004 | Milestone CRUD, status tracking |
-| **milestone-to-user** | 3008 | 9005 | N:N relationship: users ↔ milestones |
-| **milestone-to-project** | 3009 | 9006 | N:N relationship: projects ↔ milestones |
-| **group-assignments** | 3007 | 9007 | N:N relationship: users ↔ groups |
-| **project-access** | 3008 | 9008 | Project-level access control |
-| **grants** | 3010 | 9010 | Permission system (Groups, Permissions, OperationPermissions) |
-| **organization** | 3012 | 9012 | Lookup tables: SeniorityLevel, JobRole, Company |
-| **bootstrap** | 3100 | N/A | Seed data initialization |
+| Service | Port | DB Convention | Domain |
+|---------|------|---------------|--------|
+| **gateway** | 3000 | N/A | Apollo Federation gateway, REST auth endpoints, JWT validation |
+| **auth** | 3001 | `auth_{tenant}` | Session management, JWT token issuance, refresh rotation |
+| **users** | 3002 | `users_{tenant}` | User CRUD, profiles (AuthData, PersonalData, EmploymentData) |
+| **projects** | 3003 | `projects_{tenant}` | Project management, templates, holiday calendars |
+| **milestones** | 3004 | `milestones_{tenant}` | Milestone CRUD, status tracking, dependencies |
+| **milestone-to-user** | 3005 | `milestone-to-user_{tenant}` | N:N user↔milestone assignments, resource daily allocations |
+| **milestone-to-project** | 3006 | `milestone-to-project_{tenant}` | N:N project↔milestone assignments |
+| **group-assignments** | 3007 | `group-assignments_{tenant}` | N:N user↔group assignments |
+| **project-access** | 3008 | `project-access_{tenant}` | Project-level role-based access control |
+| **grants** | 3010 | `grants_{tenant}` | Groups, Permissions, OperationPermissions, PagePermissions |
+| **organization** | 3012 | `organization_{tenant}` | Lookup tables: SeniorityLevel, JobRole, Company, RoleCategory |
+| **tenants** | 3013 | Platform DB (shared) | Tenant registry, user identities, provisioning |
+| **bootstrap** | 3100 | N/A (RPC client) | Seed data initialization, multi-tenant provisioning |
 
 ## Architecture Diagram
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              EXTERNAL LAYER                                   │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                         Client (Browser/App)                            │  │
-│  │                      Next.js 14 + Apollo Client                         │  │
-│  └────────────────────────────────┬───────────────────────────────────────┘  │
-└───────────────────────────────────┼──────────────────────────────────────────┘
-                                    │ HTTPS
-                                    ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              GATEWAY LAYER                                    │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                     Gateway Service (:3000)                             │  │
-│  │  ┌──────────────┐  ┌───────────────┐  ┌────────────────────────────┐   │  │
-│  │  │ Apollo       │  │ GlobalAuth    │  │ REST Endpoints             │   │  │
-│  │  │ Federation   │  │ Guard         │  │ • POST /auth/login         │   │  │
-│  │  │ Composer     │  │ JwtStrategy   │  │ • POST /auth/refresh       │   │  │
-│  │  └──────────────┘  └───────────────┘  │ • POST /auth/logout        │   │  │
-│  │                                        │ • POST /auth/force-revoke  │   │  │
-│  └────────────────────────────────────────┴────────────────────────────────┘  │
-└───────────────────────────────────┬──────────────────────────────────────────┘
-                                    │ Redis mTLS RPC
-┌───────────────────────────────────┼──────────────────────────────────────────┐
-│                              SERVICE LAYER                                    │
-│                                   │                                           │
-│     ┌─────────────────────────────┼─────────────────────────────────┐        │
-│     │                             │                                  │        │
-│     ▼                             ▼                                  ▼        │
-│ ┌───────────┐              ┌───────────┐                     ┌───────────┐   │
-│ │Auth :3001 │              │Users :3002│                     │Grants:3010│   │
-│ │           │◄────────────►│           │◄───────────────────►│           │   │
-│ │ Sessions  │  RPC         │ Profiles  │        RPC          │ Perms     │   │
-│ │ JWT       │              │ CRUD      │                     │ Groups    │   │
-│ └─────┬─────┘              └─────┬─────┘                     └─────┬─────┘   │
-│       │                          │                                  │         │
-│       ▼                          ▼                                  ▼         │
-│ ┌───────────┐              ┌───────────┐                     ┌───────────┐   │
-│ │MongoDB    │              │MongoDB    │                     │MongoDB    │   │
-│ │auth-db    │              │users-db   │                     │grants-db  │   │
-│ │:9001      │              │:9002      │                     │:9010      │   │
-│ └───────────┘              └───────────┘                     └───────────┘   │
-│                                                                               │
-│     ┌─────────────────────────────────────────────────────────┐              │
-│     │              Additional Services                         │              │
-│     │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │              │
-│     │  │Projects  │ │Milestones│ │Milestone │ │Group     │   │              │
-│     │  │:3003     │ │:3004     │ │ToUser    │ │Assign.   │   │              │
-│     │  │          │ │          │ │:3008     │ │:3007     │   │              │
-│     │  └──────────┘ └──────────┘ └──────────┘ └──────────┘   │              │
-│     └─────────────────────────────────────────────────────────┘              │
-└──────────────────────────────────────────────────────────────────────────────┘
-                                    │
-┌───────────────────────────────────┼──────────────────────────────────────────┐
-│                          INFRASTRUCTURE LAYER                                 │
-│  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                      Redis (:6379/:6380)                                │  │
-│  │              Message Bus + Session Cache + Pub/Sub                      │  │
-│  │                     mTLS Encryption                                     │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph External
+        Client[Client - Next.js + Apollo Client]
+    end
+
+    subgraph "Gateway Layer"
+        GW[Gateway :3000]
+        GW --> |JWT Validation| JwtStrategy
+        GW --> |Session Check| AuthRPC[CHECK_SESSION RPC]
+        GW --> |HMAC Signing| SubgraphFwd[Subgraph Forwarding]
+    end
+
+    subgraph "Service Layer"
+        AUTH[Auth :3001]
+        USERS[Users :3002]
+        PROJECTS[Projects :3003]
+        MILESTONES[Milestones :3004]
+        M2U[MilestoneToUser :3005]
+        M2P[MilestoneToProject :3006]
+        GA[GroupAssignments :3007]
+        PA[ProjectAccess :3008]
+        GRANTS[Grants :3010]
+        ORG[Organization :3012]
+        TENANTS[Tenants :3013]
+    end
+
+    subgraph "Infrastructure"
+        REDIS[Redis :6379/6380 - mTLS]
+        MONGODB[(MongoDB - Per-tenant DBs)]
+        PLATFORM_DB[(Platform DB - Shared)]
+    end
+
+    Client -->|HTTPS| GW
+    GW -->|Redis RPC| AUTH
+    GW -->|Federation HTTP| AUTH & USERS & PROJECTS & MILESTONES & M2U & M2P & GA & PA & GRANTS & ORG & TENANTS
+
+    AUTH --> REDIS
+    AUTH --> MONGODB
+    USERS --> REDIS & MONGODB
+    GRANTS --> REDIS & MONGODB
+    TENANTS --> PLATFORM_DB
 ```
 
 ## Data Flow Patterns
 
-### Request Flow (GraphQL Query)
+### Authenticated GraphQL Request
 
-```
-1. Client → Gateway: POST /graphql with Bearer token
-2. Gateway → GlobalAuthGuard: Validate JWT
-3. GlobalAuthGuard → Auth Service: CHECK_SESSION (RPC)
-4. Auth Service → Gateway: { isValid, userId, groupIds }
-5. Gateway: Add signed headers (x-user-id, x-user-groups, x-gateway-signature)
-6. Gateway → Subgraph: Forward query with headers
-7. Subgraph → OperationGuard: Check operation permission
-8. Subgraph → ScopeGuard: Check scope (if @ScopeCapable)
-9. Subgraph → Resolver: Execute with field filtering
-10. Response flows back through federation
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as Gateway
+    participant JWT as JwtStrategy
+    participant Auth as Auth Service
+    participant SG as Subgraph
+
+    C->>GW: POST /graphql (Bearer token)
+    GW->>JWT: Validate JWT signature
+    JWT->>Auth: CHECK_SESSION(sessionId)
+    Auth-->>JWT: {isValid, userId, groupIds}
+    JWT-->>GW: req.user = {sub, sessionId, groups}
+
+    Note over GW: Apollo RemoteGraphQLDataSource
+    GW->>GW: Set x-user-groups, x-user-id, x-tenant-slug
+    GW->>GW: HMAC sign headers → x-gateway-signature
+
+    GW->>SG: Forward query with signed headers
+    SG->>SG: TenantInterceptor → set ALS context
+    SG->>SG: OperationGuard → check canExecute
+    SG->>SG: ViewFieldsInterceptor → load field permissions
+    SG->>SG: Resolver executes with field filtering
+    SG-->>GW: Response
+    GW-->>C: Federated response
 ```
 
-### Event Flow (User Deletion)
+### Event-Driven Side Effects (User Deletion)
 
+```mermaid
+sequenceDiagram
+    participant Resolver as Users Resolver
+    participant US as Users Service
+    participant Redis as Redis Pub/Sub
+    participant Auth as Auth Service
+    participant M2U as MilestoneToUser
+    participant GA as GroupAssignments
+
+    Resolver->>US: removeUser(userId)
+    US->>US: Set deletedAt, deletedBy
+    US->>Redis: emit('USER_DELETED', {userId})
+    
+    par Parallel event handlers
+        Redis->>Auth: USER_DELETED
+        Auth->>Auth: revokeAllSessionsOfUser
+    and
+        Redis->>M2U: USER_DELETED
+        M2U->>M2U: deleteAssignmentsForUser
+    and
+        Redis->>GA: USER_DELETED
+        GA->>GA: deleteGroupAssignmentsForUser
+    end
 ```
-1. Users Service: removeUser(userId) called
-2. Users Service → MongoDB: Set deletedAt, active=false
-3. Users Service → Redis: Emit 'USER_DELETED' event
-4. Auth Service → Listener: Receive USER_DELETED
-5. Auth Service: Revoke all sessions for userId
-6. MilestoneToUser Service → Listener: Receive USER_DELETED
-7. MilestoneToUser Service: Delete all assignments for userId
-8. GroupAssignments Service → Listener: Receive USER_DELETED
-9. GroupAssignments Service: Delete all group assignments for userId
+
+### Permission Change Propagation
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin UI
+    participant Grants as Grants Service
+    participant Redis as Redis
+    participant Services as All Services
+
+    Admin->>Grants: bulkUpdatePermissions(groupId, changes)
+    Grants->>Grants: Update DB
+    Grants->>Redis: emit('PERMISSIONS_CHANGED', {groupIds})
+    
+    par Cache invalidation
+        Redis->>Services: PERMISSIONS_CHANGED
+        Services->>Services: PermissionsCacheService.invalidateGroups(groupIds)
+    end
+    
+    Note over Services: Next request re-fetches permissions from Grants
 ```
 
 ## Service Dependencies
 
+```mermaid
+graph LR
+    GW[Gateway] --> AUTH[Auth]
+    GW --> TENANTS[Tenants]
+    GW --> GRANTS[Grants]
+    
+    AUTH --> USERS[Users]
+    AUTH --> TENANTS
+    
+    USERS --> GA[GroupAssignments]
+    USERS --> M2U[MilestoneToUser]
+    USERS --> ORG[Organization]
+    USERS --> AUTH
+    
+    MILESTONES[Milestones] --> M2U
+    MILESTONES --> M2P[MilestoneToProject]
+    
+    PROJECTS[Projects] --> M2P
+    
+    ORG --> USERS
+    
+    subgraph "Every service"
+        ALL[All Subgraphs] --> GRANTS
+    end
 ```
-                    ┌──────────┐
-                    │ Gateway  │
-                    └────┬─────┘
-                         │
-         ┌───────────────┼───────────────┐
-         ▼               ▼               ▼
-    ┌────────┐      ┌────────┐     ┌──────────┐
-    │  Auth  │◄────►│ Users  │◄───►│  Grants  │
-    └────────┘      └───┬────┘     └────┬─────┘
-                        │               │
-         ┌──────────────┼───────────────┤
-         ▼              ▼               ▼
-    ┌──────────┐  ┌───────────┐  ┌──────────────┐
-    │ Group    │  │ Milestone │  │ Organization │
-    │ Assign.  │  │ ToUser    │  │              │
-    └──────────┘  └───────────┘  └──────────────┘
-```
 
-## Key Invariants
+## Key Architectural Invariants
 
-1. **Single Entry Point**: All client requests go through the Gateway
-2. **Database Isolation**: Each service owns its database
-3. **Signed Headers**: All inter-service calls include HMAC signature
-4. **Permission Cache**: 5-minute TTL with instant invalidation
-5. **Soft Deletes**: Users are soft-deleted (deletedAt timestamp)
-6. **Session-Based Auth**: JWT + refresh tokens + server-side sessions
+| Invariant | Implementation |
+|-----------|---------------|
+| **Signed Headers** | Gateway HMAC-signs `x-user-groups`, `x-user-id`, `x-tenant-slug`, `x-tenant-id` with `INTERNAL_HEADER_SECRET`. Subgraphs verify via `verifyGatewaySignature()` |
+| **Physical DB Isolation** | `TenantConnectionManager` creates per-tenant connections: `{serviceName}_{tenantSlug}`. The "Wall" rejects unknown tenant slugs |
+| **Permission Cache** | 5-minute process-wide TTL with instant invalidation on `PERMISSIONS_CHANGED` events |
+| **Soft Deletes** | Users use `deletedAt` timestamp; hard delete available as separate operation |
+| **Session-Based Auth** | JWT access token (short-lived) + httpOnly refresh cookie (7d) + server-side session in MongoDB |
+| **Tenant Context Propagation** | HTTP: `x-tenant-slug` header. RPC: `_tenantSlug` field auto-injected by `TenantAwareClientProxy`, read by `TenantInterceptor`, stored in `AsyncLocalStorage` |
+| **RPC Security** | Bootstrap-only mutations use `RpcInternalGuard` with `_internalSecret` in payload |
 
-## Environment Modes
+## Technology Stack
 
-| Mode | Configuration | Use Case |
-|------|--------------|----------|
-| Development | `.env.development` | Local development with docker-compose |
-| Production | `.env.production` | Production deployment |
-| Test | `.env.test` | Automated testing |
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node.js 22, NestJS 10 |
+| GraphQL | Apollo Federation 2 (IntrospectAndCompose) |
+| Database | MongoDB (per-tenant via Mongoose `useDb`) |
+| Transport | Redis with mTLS (microservice RPC + event bus + cache) |
+| Auth | Passport.js + JWT + bcryptjs |
+| Multi-tenancy | `@cucu/tenant-db` (AsyncLocalStorage + connection pooling) |
+| Orchestration | `@cucu/microservices-orchestrator` (dependency checking at startup) |
 
 ## Next Steps
 
-- [Apollo Federation](/architecture/federation) - Federation patterns and entity resolution
-- [Service Communication](/architecture/communication) - RPC and event patterns in detail
-- [Authentication Flow](/architecture/auth-flow) - JWT, sessions, and refresh tokens
+- [Multi-Tenant Architecture](/architecture/multi-tenant) — complete DB isolation design
+- [Service Communication](/architecture/communication) — RPC and event patterns
+- [Apollo Federation](/architecture/federation) — entity resolution and cross-service fields
+- [Authentication Flow](/architecture/auth-flow) — login, JWT, refresh, session lifecycle
+- [Permission System](/architecture/permissions) — three-tier permission enforcement
+- [Startup Orchestration](/architecture/startup) — service dependency checking

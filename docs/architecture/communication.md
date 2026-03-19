@@ -1,56 +1,79 @@
 # Service Communication
 
-All inter-service communication in Cucu uses Redis with mTLS encryption. This document covers the RPC patterns, event system, and security mechanisms.
+All inter-service communication in Cucu uses **Redis with mTLS encryption** as the transport layer. There are two communication patterns: request-response (MessagePattern) and fire-and-forget events (EventPattern).
 
 ## Communication Patterns
 
 ### MessagePattern (Request-Response)
 
-Used for synchronous operations where a response is expected:
+Used when the caller needs a response. The caller blocks until the response arrives or a timeout occurs.
 
 ```typescript
-// Sender (e.g., Gateway or Users service)
+// Caller (e.g., Gateway)
 const result = await lastValueFrom(
-  this.authClient.send<CheckSessionResponse>('CHECK_SESSION', {
-    sessionId: 'session-123'
-  })
+  this.authClient.send<CheckSessionResponse>('CHECK_SESSION', { sessionId })
 );
 
-// Receiver (Auth controller)
-@Controller()
-export class AuthController {
-  @MessagePattern('CHECK_SESSION')
-  async checkSession(@Payload() data: { sessionId: string }) {
-    return this.authService.checkSessionValidity(data.sessionId);
-  }
+// Handler (Auth service controller)
+@MessagePattern('CHECK_SESSION')
+async checkSession(@Payload() data: { sessionId: string }) {
+  return this.authService.checkSessionValidity(data.sessionId);
 }
 ```
 
 ### EventPattern (Fire-and-Forget)
 
-Used for asynchronous notifications where no response is expected:
+Used for side-effect notifications where the caller doesn't need a response. Events may be received by multiple listeners.
 
 ```typescript
-// Sender (Users service)
-this.authClient.emit('USER_DELETED', { userId: 'user-123' });
+// Emitter (Users service)
+this.authClient.emit('USER_DELETED', { userId });
 
-// Receiver (Auth controller)
-@Controller()
-export class AuthController {
-  @EventPattern('USER_DELETED')
-  async handleUserDeleted(@Payload() data: { userId: string }) {
-    await this.authService.revokeAllSessionsOfUser(data.userId);
-  }
+// Listener (Auth service)
+@EventPattern('USER_DELETED')
+async handleUserDeleted(@Payload() data: { userId: string }) {
+  await this.authService.revokeAllSessionsOfUser(data.userId);
 }
 ```
 
 ## Redis Transport Configuration
 
-### Module Registration
+### mTLS Setup
+
+Every service connects to Redis with mutual TLS. Configuration is built via `buildRedisTlsOptions()`:
 
 ```typescript
-// apps/users/src/users.module.ts
-ClientsModule.registerAsync([
+function buildRedisTlsOptions(cfg: ConfigService, envPrefix: string): RedisOptions {
+  const host = cfg.get('REDIS_SERVICE_HOST');
+  const tlsPort = cfg.get<number>('REDIS_SERVICE_TLS_PORT', 6380);
+  const certPath = cfg.get(`${envPrefix}_REDIS_TLS_CLIENT_CERT`);
+  const keyPath = cfg.get(`${envPrefix}_REDIS_TLS_CLIENT_KEY`);
+  const caPath = cfg.get('REDIS_TLS_CA_CERT');
+
+  if (certPath && keyPath && caPath) {
+    return {
+      host, port: tlsPort,
+      tls: {
+        cert: fs.readFileSync(certPath),
+        key: fs.readFileSync(keyPath),
+        ca: [fs.readFileSync(caPath)],
+        rejectUnauthorized: true,
+      },
+    };
+  }
+  // Fallback to plain (development only)
+  return { host, port: cfg.get<number>('REDIS_SERVICE_PORT', 6379) };
+}
+```
+
+Each service has its own TLS client certificate, identified by the `envPrefix` (e.g., `AUTH_REDIS_TLS_CLIENT_CERT`, `USERS_REDIS_TLS_CLIENT_CERT`).
+
+### Client Registration
+
+Services register their Redis clients via `ClientsModule.registerAsync()`:
+
+```typescript
+const RedisClientsModule = ClientsModule.registerAsync([
   {
     name: 'AUTH_SERVICE',
     imports: [ConfigModule],
@@ -60,336 +83,207 @@ ClientsModule.registerAsync([
       options: buildRedisTlsOptions(cfg, 'USERS'),
     }),
   },
-  {
-    name: 'GRANTS_SERVICE',
-    imports: [ConfigModule],
-    inject: [ConfigService],
-    useFactory: (cfg: ConfigService) => ({
-      transport: Transport.REDIS,
-      options: buildRedisTlsOptions(cfg, 'USERS'),
-    }),
-  },
-])
+]);
 ```
 
-### TLS Configuration
+With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` instead, which wraps each client with `TenantAwareClientProxy` to auto-inject `_tenantSlug`.
 
-```typescript
-// _shared/service-common/src/utils/redis-tls.options.ts
-export function buildRedisTlsOptions(
-  cfg: ConfigService,
-  envPrefix: string
-): RedisOptions {
-  const host = cfg.get('REDIS_SERVICE_HOST', 'redis');
-  const tlsPort = cfg.get<number>('REDIS_SERVICE_TLS_PORT', 6380);
-  const certPath = cfg.get(`${envPrefix}_REDIS_TLS_CLIENT_CERT`);
-  const keyPath = cfg.get(`${envPrefix}_REDIS_TLS_CLIENT_KEY`);
-  const caPath = cfg.get('REDIS_TLS_CA_CERT');
+## Complete RPC Catalog
 
-  if (certPath && keyPath && caPath) {
-    return {
-      host,
-      port: tlsPort,
-      tls: {
-        cert: fs.readFileSync(certPath),
-        key: fs.readFileSync(keyPath),
-        ca: [fs.readFileSync(caPath)],
-        rejectUnauthorized: true,
-      },
-    };
-  }
+### Auth Service
 
-  // Fallback to plain connection (development only)
-  return {
-    host,
-    port: cfg.get<number>('REDIS_SERVICE_PORT', 6379),
-  };
-}
-```
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `LOGIN` | Message | `{email, password, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Legacy login (deprecated) |
+| `CREATE_AUTHENTICATED_SESSION` | Message | `{userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Create session after platform DB verification |
+| `CHECK_SESSION` | Message | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session for every request |
+| `REFRESH_SESSION` | Message | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Token rotation |
+| `REVOKE_SESSION` | Message | `{sessionId, requestUserId, force}` | void | Revoke single session |
+| `SWITCH_SESSION_TENANT` | Message | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch |
+| `USER_DELETED` | Event | `{userId}` | — | Revoke all sessions for deleted user |
+| `REVOKE_ALL_SESSIONS` | Event | `{userId}` | — | Revoke all sessions for user |
 
-## Event Flow Diagrams
+### Users Service
 
-### User Deletion Flow
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `USER_EXISTS` | Message | `string \| {id}` | `boolean` | Check if user exists |
+| `CREATE_USER` | Message | `CreateUserInput` | `User` | Create user (bootstrap) |
+| `FIND_USER_BY_EMAIL` | Message | `{email, forAuth?}` | `{_id, password?, groupIds} \| null` | Find user by email |
+| `FIND_USER_WITH_PASSWORD` | Message | `{userId}` | `{_id, password, email} \| null` | Get user with password hash (for changePassword) |
+| `UPDATE_USER` | Message | `UpdateUserInput` | `User` | Update user |
+| `UPDATE_USER_PASSWORD` | Message | `{userId, newPasswordHash}` | void | Update password hash |
+| `FIND_GROUPIDS_BY_USERID` | Message | `{userId}` | `{groupIds: string[]}` | Get user's group IDs |
+| `GET_ORG_ENTITY_USAGE_COUNT` | Message | `{field, id}` | `number` | Count users referencing a lookup entity |
+| `USER_GROUPS_CHANGED` | Event | `{userId}` | — | Sync authData.groupIds in user document |
+| `PERMISSIONS_CHANGED` | Event | `{groupIds}` | — | Invalidate permission cache |
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Users Service                                  │
-│  1. removeUser(userId) called                                    │
-│  2. Set deletedAt timestamp, active=false                        │
-│  3. Emit 'USER_DELETED' event                                    │
-└────────────────────────────────┬─────────────────────────────────┘
-                                 │
-                    Redis Pub/Sub (USER_DELETED)
-                                 │
-        ┌────────────────────────┼────────────────────────┐
-        ▼                        ▼                        ▼
-┌───────────────┐       ┌───────────────┐        ┌───────────────┐
-│ Auth Service  │       │ MilestoneToUser│       │GroupAssignments│
-│               │       │               │        │               │
-│ Revoke all    │       │ Delete all    │        │ Delete all    │
-│ sessions      │       │ assignments   │        │ assignments   │
-└───────────────┘       └───────────────┘        └───────────────┘
-```
+### Grants Service
 
-### Permission Change Flow
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `GROUP_EXISTS` | Message | `string \| {id}` | `boolean` | Check if group exists |
+| `FIND_GROUP_BY_NAME` | Message | `string \| {name}` | `Group \| null` | Find group by name |
+| `CREATE_GROUP` | Message | `CreateGroupInput` + `_internalSecret` | `Group` | Create group (RpcInternalGuard) |
+| `CREATE_PERMISSION` | Message | `CreatePermissionInput` + `_internalSecret` | `Permission` | Create permission (RpcInternalGuard) |
+| `UPSERT_PERMISSION` | Message | `CreatePermissionInput` + `_internalSecret` | `Permission` | Upsert permission (RpcInternalGuard) |
+| `CREATE_OPERATION_PERMISSION` | Message | `CreateOperationPermissionInput` + `_internalSecret` | `OperationPermission` | Create op permission (RpcInternalGuard) |
+| `UPSERT_OPERATION_PERMISSION` | Message | `CreateOperationPermissionInput` + `_internalSecret` | `OperationPermission` | Upsert op permission (RpcInternalGuard) |
+| `UPSERT_PAGE_PERMISSION` | Message | `CreatePagePermissionInput` + `_internalSecret` | `PagePermission` | Upsert page permission (RpcInternalGuard) |
+| `FIND_OP_PERMISSIONS_BY_GROUP` | Message | `{groupId}` | `OperationPermission[]` | List operation permissions |
+| `FIND_PERMISSIONS_BY_GROUP` | Message | `{groupId, entityName?}` | `Permission[]` | List field permissions |
+| `FIND_PAGE_PERMISSIONS_BY_GROUP` | Message | `{groupId}` | `PagePermission[]` | List page permissions |
+| `FIND_BULK_PERMISSIONS_MULTI` | Message | `{groupIds, entityNames?, opNames?}` | `BulkPermsDTO` | Bulk load for PermissionsCacheService |
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    Grants Service                                 │
-│  1. updatePermission(...) or updateOperationPermission(...)      │
-│  2. Emit 'PERMISSIONS_CHANGED' with affected groupIds            │
-└────────────────────────────────┬─────────────────────────────────┘
-                                 │
-                    Redis Pub/Sub (PERMISSIONS_CHANGED)
-                                 │
-        ┌────────────────────────┼────────────────────────┐
-        ▼                        ▼                        ▼
-┌───────────────┐       ┌───────────────┐        ┌───────────────┐
-│ Users Service │       │ Projects Svc  │        │ Milestones Svc│
-│               │       │               │        │               │
-│ Invalidate    │       │ Invalidate    │        │ Invalidate    │
-│ perm cache    │       │ perm cache    │        │ perm cache    │
-│ for groups    │       │ for groups    │        │ for groups    │
-└───────────────┘       └───────────────┘        └───────────────┘
-```
+### GroupAssignments Service
 
-## Complete RPC Pattern Catalog
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `FIND_GROUP_ASSIGNMENTS_BY_USER_ID` | Message | `string` | `GroupAssignment[]` | User's group memberships |
+| `FIND_GROUP_ASSIGNMENTS_BY_GROUP_ID` | Message | `string` | `GroupAssignment[]` | Group's members |
+| `CREATE_GROUP_ASSIGNMENT` | Message | `{userId, groupId}` | `GroupAssignment` | Create assignment |
+| `USER_CREATED` | Event | `{userId, groupIds}` | — | Create assignments for new user |
+| `USER_UPDATED` | Event | `{userId, groupIds}` | — | Sync assignments on user update |
+| `USER_DELETED` | Event | `{userId}` | — | Delete all assignments |
+| `USER_HARD_DELETED` | Event | `{userId}` | — | Delete all assignments (permanent) |
+| `GROUP_CREATED` | Message | `{groupId, userIds}` | — | Create assignments for new group |
+| `GROUP_UPDATED` | Message | `{groupId, userIds}` | — | Sync assignments on group update |
+| `GROUP_DELETED` | Message | `{groupId}` | — | Delete all assignments for group |
 
-### Auth Service Patterns
+### MilestoneToUser Service
 
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `LOGIN` | Message | `{ email, password, ip, deviceName, browserName, deviceFingerprint }` | `{ accessToken, userId, sessionId, expiresIn }` |
-| `CHECK_SESSION` | Message | `{ sessionId }` | `{ isValid, userId?, groupIds?, reason? }` |
-| `REFRESH_SESSION` | Message | `{ refreshToken }` | `{ accessToken, userId, sessionId, expiresIn }` |
-| `REVOKE_SESSION` | Message | `{ sessionId, requestUserId, force }` | `void` |
-| `USER_DELETED` | Event | `{ userId }` | N/A |
-| `REVOKE_ALL_SESSIONS` | Event | `{ userId }` | N/A |
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `FIND_MILESTONE_TO_USER_BY_USER_ID` | Message | `string` | `{_id}[]` | User's milestone assignments |
+| `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | Message | `string` | `{_id}[]` | Milestone's assigned users |
+| `USER_CREATED` | Event | `{userId, assignedMilestoneIds}` | — | Create assignments |
+| `USER_UPDATED` | Event | `{userId, assignedMilestoneIds}` | — | Sync assignments |
+| `USER_DELETED` | Event | `{userId}` | — | Delete all assignments |
+| `MILESTONE_CREATED` | Event | `{milestoneId, assignedUserIds, startDates?, endDates?}` | — | Create assignments |
+| `MILESTONE_UPDATED` | Event | `{milestoneId, assignedUserIds, startDates?, endDates?}` | — | Sync assignments |
+| `MILESTONE_DELETED` | Event | `{milestoneId}` | — | Delete all assignments |
 
-### Users Service Patterns
+### MilestoneToProject Service
 
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `USER_EXISTS` | Message | `userId: string` | `boolean` |
-| `CREATE_USER` | Message | `CreateUserInput` | `User` |
-| `FIND_USER_BY_EMAIL` | Message | `{ email, forAuth? }` | `{ _id, password?, groupIds }` or `null` |
-| `FIND_USER_WITH_PASSWORD` | Message | `{ userId }` | `{ _id, password }` or `null` |
-| `UPDATE_USER` | Message | `UpdateUserInput` | `User` |
-| `UPDATE_USER_PASSWORD` | Message | `{ userId, newPassword }` | `void` |
-| `FIND_GROUPIDS_BY_USERID` | Message | `{ userId }` | `{ groupIds: string[] }` |
-| `GET_ORG_ENTITY_USAGE_COUNT` | Message | `{ field, id }` | `number` |
-| `USER_GROUPS_CHANGED` | Event | `{ userId }` | N/A |
-| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `FIND_MILESTONE_TO_PROJECT_BY_PROJECT_ID` | Message | `string` | assignments | Project's milestones |
+| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` | Message | `string` | assignments | Milestone's projects |
+| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_IDS` | Message | `string[]` | assignments | Batch lookup |
+| `CREATE_MILESTONE_TO_PROJECT` | Message | `{milestoneId, projectId, startDate?, endDate?}` | assignment | Direct create (bootstrap) |
+| `PROJECT_CREATED` | Event | `{projectId, assignedMilestoneIds}` | — | Create assignments |
+| `PROJECT_UPDATED` | Event | `{projectId, assignedMilestoneIds}` | — | Sync assignments |
+| `PROJECT_DELETED` | Event | `{projectId}` | — | Delete assignments |
+| `MILESTONE_CREATED` | Event | `{milestoneId, assignedProjectIds, startDates?, endDates?}` | — | Create assignments |
+| `MILESTONE_DELETED` | Event | `{milestoneId}` | — | Delete assignments |
 
-### Grants Service Patterns
+### Milestones Service
 
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `GROUP_EXISTS` | Message | `groupId: string` | `boolean` |
-| `FIND_GROUP_BY_NAME` | Message | `name: string` | `Group` or `null` |
-| `CREATE_GROUP` | Message | `CreateGroupInput` | `Group` |
-| `CREATE_PERMISSION` | Message | `CreatePermissionInput` | `Permission` |
-| `UPSERT_PERMISSION` | Message | `CreatePermissionInput` | `Permission` |
-| `CREATE_OPERATION_PERMISSION` | Message | `CreateOperationPermissionInput` | `OperationPermission` |
-| `UPSERT_OPERATION_PERMISSION` | Message | `CreateOperationPermissionInput` | `OperationPermission` |
-| `FIND_OP_PERMISSIONS_BY_GROUP` | Message | `{ groupId }` | `OperationPermission[]` |
-| `FIND_PERMISSIONS_BY_GROUP` | Message | `{ groupId, entityName? }` | `Permission[]` |
-| `FIND_BULK_PERMISSIONS_MULTI` | Message | `{ groupIds }` | `BulkPermissionsDTO` |
-| `UPSERT_PAGE_PERMISSION` | Message | `CreatePagePermissionInput` | `PagePermission` |
-| `FIND_PAGE_PERMISSIONS_BY_GROUP` | Message | `{ groupId }` | `PagePermission[]` |
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `MILESTONE_EXISTS` | Message | `string \| {id}` | `boolean` | Check existence |
+| `FIND_MILESTONE_BY_NAME` | Message | `{name}` | `Milestone \| null` | Find by name |
+| `GET_MILESTONE_DATES` | Message | `string` | `{startDate, endDate}` | Get date range |
+| `CREATE_MILESTONE` | Message | `CreateMilestoneInput` | `Milestone` | Create (bootstrap) |
+| `UPDATE_MILESTONE` | Message | `UpdateMilestoneInput` | `Milestone` | Update |
+| `UPDATE_MILESTONE_STATUS` | Message | `{milestoneId, status}` | `Milestone` | Update status |
+| `DELETE_MILESTONE` | Message | `string` | `Milestone` | Delete |
 
-### GroupAssignments Service Patterns
+### Projects Service
 
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `FIND_GROUP_ASSIGNMENTS_BY_USER_ID` | Message | `userId: string` | `GroupAssignment[]` |
-| `FIND_GROUP_ASSIGNMENTS_BY_GROUP_ID` | Message | `groupId: string` | `GroupAssignment[]` |
-| `USER_CREATED` | Event | `{ userId, groupIds? }` | N/A |
-| `USER_UPDATED` | Event | `{ userId, groupIds? }` | N/A |
-| `USER_DELETED` | Event | `{ userId }` | N/A |
-| `GROUP_CREATED` | Event | `{ groupId, userIds? }` | N/A |
-| `GROUP_UPDATED` | Event | `{ groupId, userIds? }` | N/A |
-| `GROUP_DELETED` | Event | `{ groupId }` | N/A |
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `PROJECT_EXISTS` | Message | `string \| {id}` | `boolean` | Check existence |
+| `FIND_PROJECT_BY_NAME` | Message | `string` | `Project \| null` | Find by name |
+| `GET_PROJECT_DATES` | Message | `string` | `{startDate, endDate}` | Get date range |
+| `CREATE_PROJECT` | Message | `{projectBasicData, assignedMilestoneIds?}` | `Project` | Create (bootstrap) |
+| `CREATE_PROJECT_TEMPLATE` | Message | `{name, description?, scope, createdBy?}` | `ProjectTemplate` | Create template (bootstrap) |
+| `FIND_PROJECT_TEMPLATE_BY_NAME` | Message | `string` | `ProjectTemplate \| null` | Find template |
+| `CREATE_PROJECT_TEMPLATE_PHASE` | Message | `{templateId, name, orderIndex, ...}` | `ProjectTemplatePhase` | Create phase |
 
-### MilestoneToUser Service Patterns
+### Organization Service
 
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `FIND_MILESTONE_TO_USER_BY_USER_ID` | Message | `userId: string` | `{ _id: string }[]` |
-| `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | Message | `milestoneId: string` | `{ _id: string }[]` |
-| `USER_CREATED` | Event | `{ userId, milestoneIds? }` | N/A |
-| `USER_UPDATED` | Event | `{ userId, milestoneIds? }` | N/A |
-| `USER_DELETED` | Event | `{ userId }` | N/A |
-| `MILESTONE_CREATED` | Event | `{ milestoneId, userIds? }` | N/A |
-| `MILESTONE_DELETED` | Event | `{ milestoneId }` | N/A |
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `FIND_SENIORITY_LEVELS_BY_IDS` | Message | `string[]` | `SeniorityLevel[]` | Batch lookup |
+| `FIND_JOB_ROLES_BY_IDS` | Message | `string[]` | `JobRole[]` | Batch lookup |
+| `FIND_COMPANIES_BY_IDS` | Message | `string[]` | `Company[]` | Batch lookup |
+| `FIND_ROLE_CATEGORIES_BY_IDS` | Message | `string[]` | `RoleCategory[]` | Batch lookup |
+| `CREATE_SENIORITY_LEVEL` | Message | `{name, order, description?}` | `SeniorityLevel` | Bootstrap seeder |
+| `CREATE_JOB_ROLE` | Message | `{name, order, description?}` | `JobRole` | Bootstrap seeder |
+| `CREATE_ROLE_CATEGORY` | Message | `{name, description?}` | `RoleCategory` | Bootstrap seeder |
+| Various `FIND_*_BY_NAME` | Message | `string` | entity or null | Bootstrap seeder lookup |
 
-### Organization Service Patterns
+### Tenants Service
 
-| Pattern | Type | Payload | Response |
-|---------|------|---------|----------|
-| `FIND_SENIORITY_LEVELS_BY_IDS` | Message | `ids: string[]` | `SeniorityLevel[]` |
-| `FIND_JOB_ROLES_BY_IDS` | Message | `ids: string[]` | `JobRole[]` |
-| `FIND_COMPANIES_BY_IDS` | Message | `ids: string[]` | `Company[]` |
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `TENANT_EXISTS` | Message | `string` | `boolean` | Check existence |
+| `FIND_TENANT_BY_ID` | Message | `string` | `Tenant \| null` | Find by ID |
+| `FIND_TENANT_BY_SLUG` | Message | `string` | `Tenant \| null` | Find by slug |
+| `RESOLVE_TENANT_BY_SLUG` | Message | `string` | `Tenant \| null` | Resolve active tenant |
+| `CHECK_SLUG_AVAILABILITY` | Message | `string` | `{valid, error?}` | Validate slug |
+| `BOOTSTRAP_TENANT` | Message | `{slug, name, ownerEmail, adminPassword, ...}` | `{success, tenantId}` | Create + provision |
+| `CHECK_PLATFORM_ADMIN` | Message | `{email}` | `{isPlatformAdmin}` | Admin check |
+| `VERIFY_IDENTITY_PASSWORD` | Message | `{email, password, tenantSlug}` | identity | Login verification |
+| `DISCOVER_TENANTS` | Message | `{email}` | memberships | List tenants for email |
+| `SWITCH_TENANT` | Message | `{email, tenantSlug}` | `{userId, tenantSlug, tenantId}` | Tenant switch |
+| `GET_IDENTITY_MEMBERSHIPS` | Message | `{email}` | `{memberships, isPlatformAdmin}` | Full identity info |
+| `UPDATE_IDENTITY_PASSWORD` | Message | `{email, newPasswordHash}` | void | Update password |
+| `UPSERT_USER_IDENTITY` | Message | `{email, passwordHash, name, surname, ...}` | identity | Create/update identity |
 
-## Internal RPC Security
+## RPC Security
 
 ### RpcInternalGuard
 
-Protects sensitive RPC mutation handlers from unauthorized Redis callers:
+Protects sensitive bootstrap-only RPC endpoints from unauthorized callers:
 
 ```typescript
-// Protecting bootstrap operations
 @UseGuards(RpcInternalGuard)
 @MessagePattern('CREATE_GROUP')
-async createGroup(@Payload() dto: CreateGroupInput) {
-  return this.groupsService.create(dto);
+async createGroup(@Payload() dto: CreateGroupInput) { ... }
+```
+
+The guard verifies `_internalSecret` in the payload using timing-safe comparison, then strips it before the handler runs:
+
+```typescript
+canActivate(context: ExecutionContext): boolean {
+  const data = context.switchToRpc().getData();
+  const internalSecret = data?._internalSecret;
+  if (!timingSafeEqual(secret, internalSecret)) throw new ForbiddenException();
+  delete data._internalSecret;
+  return true;
 }
 ```
 
-The guard verifies an internal secret:
+### Gateway HMAC Signature
+
+The Gateway signs internal headers with HMAC-SHA256 using `INTERNAL_HEADER_SECRET`:
 
 ```typescript
-// _shared/service-common/src/guards/rpc-internal.guard.ts
-@Injectable()
-export class RpcInternalGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
-    if (context.getType() !== 'rpc') {
-      throw new ForbiddenException('This endpoint is RPC-only');
-    }
+const payload = `${userGroups}|${internalCall}|${userId}|${tenantSlug}|${tenantId}`;
+const signature = createHmac('sha256', secret).update(payload).digest('hex');
+headers.set('x-gateway-signature', signature);
+```
 
-    const secret = this.configService.get('INTERNAL_HEADER_SECRET');
-    if (!secret) {
-      throw new ForbiddenException('INTERNAL_HEADER_SECRET not configured');
-    }
+Subgraphs verify this signature via `verifyGatewaySignature(headers)` before trusting any `x-user-*` or `x-tenant-*` headers. This prevents direct calls to subgraph HTTP endpoints from spoofing user identity.
 
-    const data = context.switchToRpc().getData();
-    const internalSecret = data?._internalSecret;
+## Event-Driven Patterns
 
-    // Timing-safe comparison
-    if (!internalSecret || !timingSafeEqual(secret, internalSecret)) {
-      throw new ForbiddenException('Invalid internal secret');
-    }
+### Design Principles
 
-    // Strip secret from payload
-    delete data._internalSecret;
-    return true;
-  }
+1. **Events are fire-and-forget** — emitters don't wait for handlers
+2. **Handlers must be idempotent** — events may be delivered multiple times
+3. **No event loops** — service A emits → B handles, but B does NOT re-emit the same event
+4. **Direct emission** — the service that changes state emits the event (not relay via intermediate)
+
+### Global Event: PERMISSIONS_CHANGED
+
+Every subgraph listens for `PERMISSIONS_CHANGED` and invalidates its local permission cache:
+
+```typescript
+@EventPattern('PERMISSIONS_CHANGED')
+handlePermissionsChanged(@Payload() data: { groupIds: string[] }) {
+  PermissionsCacheService.invalidateGroups(data.groupIds);
 }
 ```
-
-### Calling Protected Endpoints
-
-```typescript
-// From bootstrap service
-await lastValueFrom(
-  this.grantsClient.send('CREATE_GROUP', {
-    ...createGroupInput,
-    _internalSecret: process.env.INTERNAL_HEADER_SECRET,
-  })
-);
-```
-
-## Error Handling
-
-### RPC Timeouts
-
-```typescript
-// Default timeout: 30 seconds
-const result = await lastValueFrom(
-  this.client.send('PATTERN', payload).pipe(
-    timeout(30000),
-    catchError(err => {
-      if (err instanceof TimeoutError) {
-        throw new GatewayTimeoutException('Service unavailable');
-      }
-      throw err;
-    })
-  )
-);
-```
-
-### Service Unavailability
-
-```typescript
-// Handle connection errors gracefully
-try {
-  const result = await lastValueFrom(
-    this.client.send('PATTERN', payload)
-  );
-} catch (error) {
-  if (error.message?.includes('ECONNREFUSED')) {
-    throw new ServiceUnavailableException('Service offline');
-  }
-  throw error;
-}
-```
-
-## Best Practices
-
-### 1. Use lastValueFrom
-
-Always use `lastValueFrom` from RxJS to convert Observable to Promise:
-
-```typescript
-import { lastValueFrom } from 'rxjs';
-
-// GOOD
-const result = await lastValueFrom(this.client.send('PATTERN', data));
-
-// BAD (deprecated)
-const result = await this.client.send('PATTERN', data).toPromise();
-```
-
-### 2. Define Clear Payload Types
-
-```typescript
-// Define interfaces for payloads
-interface CheckSessionPayload {
-  sessionId: string;
-}
-
-interface CheckSessionResponse {
-  isValid: boolean;
-  userId?: string;
-  groupIds?: string[];
-  reason?: string;
-}
-
-// Use generic typing
-const result = await lastValueFrom(
-  this.client.send<CheckSessionResponse, CheckSessionPayload>(
-    'CHECK_SESSION',
-    { sessionId }
-  )
-);
-```
-
-### 3. Handle Events Idempotently
-
-Events may be delivered multiple times. Design handlers accordingly:
-
-```typescript
-@EventPattern('USER_DELETED')
-async handleUserDeleted(@Payload() data: { userId: string }) {
-  // Idempotent: deleteMany is safe to call multiple times
-  await this.assignmentModel.deleteMany({ userId: data.userId });
-}
-```
-
-### 4. Log RPC Calls
-
-```typescript
-@MessagePattern('CHECK_SESSION')
-async checkSession(@Payload() data: { sessionId: string }) {
-  this.logger.log(`CHECK_SESSION => sessionId=${data.sessionId}`);
-  const result = await this.authService.checkSessionValidity(data.sessionId);
-  this.logger.log(`CHECK_SESSION result => isValid=${result.isValid}`);
-  return result;
-}
-```
-
-## Next Steps
-
-- [Authentication Flow](/architecture/auth-flow) - How login/session verification uses RPC
-- [Permission System](/architecture/permissions) - Permission checking via RPC
-- [RPC Patterns Reference](/reference/rpc-patterns) - Complete pattern catalog

@@ -1,394 +1,97 @@
-# Milestone to Project Service
+# MilestoneToProject Service
 
-The MilestoneToProject service manages **N:N relationships between Projects and Milestones** with assignment dates.
+The MilestoneToProject service manages the **N:N relationship between milestones and projects**. Each assignment can have its own start/end dates that may differ from the parent milestone's dates.
 
 ## Overview
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3006 |
-| **Database** | milestone-to-project-db (MongoDB, port 9006) |
-| **Role** | Project ↔ Milestone relationships |
-| **Dependencies** | Projects, Milestones |
+| Port | 3006 |
+| Database | `milestone-to-project_{tenantSlug}` |
+| Collection | `milestonetoproject` |
+| Module | `MilestoneToProjectModule` |
+| Context | `M2pContext` (request-scoped) |
 
 ## Schema
 
-### MilestoneToProject
-
 ```typescript
-interface MilestoneToProject {
-  _id: ID;
-  projectId: ID;           // Reference to Project
-  milestoneId: ID;         // Reference to Milestone
-  startDate?: string;      // Override milestone start date
-  endDate?: string;        // Override milestone end date
-  project?: Project;       // Resolved via federation
-  milestone?: Milestone;   // Resolved via federation
-  createdAt: Date;
-  updatedAt: Date;
+@Directive('@key(fields: "_id")')
+@Schema({ timestamps: true })
+class MilestoneToProject {
+  _id: string
+  projectId: string            // required
+  milestoneId: string          // required
+  startDate?: string           // Assignment-specific dates
+  endDate?: string
+  tenantId?: string
 }
 ```
 
-## API Reference
+## GraphQL Schema
 
-### GraphQL Queries
+### Queries
 
-#### findAllMilestoneToProject
+| Query | Args | Return |
+|-------|------|--------|
+| `findAllMilestoneToProject` | `pagination?, filter?, sort?` | `PaginatedMilestoneToProjects!` |
+| `findMilestoneToProjectByProjectId` | `projectId: ID!, pagination?, sort?` | `PaginatedMilestoneToProjects!` |
+| `findMilestoneToProjectByMilestoneId` | `milestoneId: ID!, pagination?, sort?` | `PaginatedMilestoneToProjects!` |
+| `getMilestoneToProject` | `id: ID!` | `MilestoneToProject!` |
 
-```graphql
-query FindAllMilestoneToProject(
-  $pagination: PaginationInput
-  $filter: MilestoneToProjectFilterInput
-  $sort: SortInput
-) {
-  findAllMilestoneToProject(pagination: $pagination, filter: $filter, sort: $sort) {
-    items {
-      _id
-      projectId
-      milestoneId
-      startDate
-      endDate
-      project { _id projectBasicData { name } }
-      milestone { _id milestoneBasicData { name } }
-    }
-    totalCount
-    hasNextPage
-  }
-}
-```
+### Mutations
 
-**Filter Options:**
-```typescript
-interface MilestoneToProjectFilterInput {
-  projectId?: ID;     // Filter by project ID
-  milestoneId?: ID;   // Filter by milestone ID
-}
-```
+| Mutation | Args | Return |
+|----------|------|--------|
+| `createMilestoneToProject` | `input` | `MilestoneToProject!` |
+| `updateMilestoneToProject` | `input` | `MilestoneToProject!` |
+| `removeMilestoneToProject` | `id: ID!` | `MilestoneToProject!` |
+| `createAssignmentsForProject` | `projectId, milestoneIds, startDates?, endDates?` | `Boolean!` |
+| `createMilestoneToProjectForProject` | `milestoneId, projectIds, startDates?, endDates?` | `Boolean!` |
+| `updateAssignmentsForProject` | `projectId, milestoneIds, startDates?, endDates?` | `Boolean!` |
+| `updateMilestoneToProjectForProject` | `milestoneId, projectIds, startDates?, endDates?` | `Boolean!` |
+| `deleteAssignmentsForProject` | `projectId` | `Boolean!` |
+| `deleteMilestoneToProjectForProject` | `milestoneId` | `Boolean!` |
 
-#### findMilestoneToProjectByProjectId
+### ResolveField
 
-```graphql
-query FindMilestoneToProjectByProjectId(
-  $projectId: ID!
-  $pagination: PaginationInput
-  $sort: SortInput
-) {
-  findMilestoneToProjectByProjectId(projectId: $projectId, pagination: $pagination, sort: $sort) {
-    items {
-      _id
-      milestoneId
-      milestone { _id milestoneBasicData { name status } }
-      startDate
-      endDate
-    }
-    totalCount
-  }
-}
-```
-
-#### findMilestoneToProjectByMilestoneId
-
-```graphql
-query FindMilestoneToProjectByMilestoneId(
-  $milestoneId: ID!
-  $pagination: PaginationInput
-  $sort: SortInput
-) {
-  findMilestoneToProjectByMilestoneId(milestoneId: $milestoneId, pagination: $pagination, sort: $sort) {
-    items {
-      _id
-      projectId
-      project { _id projectBasicData { name } }
-      startDate
-      endDate
-    }
-    totalCount
-  }
-}
-```
-
-#### getMilestoneToProject
-
-```graphql
-query GetMilestoneToProject($id: ID!) {
-  getMilestoneToProject(id: $id) {
-    _id
-    projectId
-    milestoneId
-    startDate
-    endDate
-  }
-}
-```
-
-### GraphQL Mutations
-
-#### createMilestoneToProject
-
-```graphql
-mutation CreateMilestoneToProject($input: CreateMilestoneToProjectInput!) {
-  createMilestoneToProject(createMilestoneToProjectInput: $input) {
-    _id
-    projectId
-    milestoneId
-  }
-}
-
-# Variables
-{
-  "input": {
-    "projectId": "project-123",
-    "milestoneId": "milestone-456",
-    "startDate": "2024-01-01",
-    "endDate": "2024-06-30"
-  }
-}
-```
-
-#### updateMilestoneToProject
-
-```graphql
-mutation UpdateMilestoneToProject($input: UpdateMilestoneToProjectInput!) {
-  updateMilestoneToProject(updateMilestoneToProjectInput: $input) {
-    _id
-    startDate
-    endDate
-  }
-}
-
-# Variables
-{
-  "input": {
-    "_id": "m2p-123",
-    "startDate": "2024-02-01",
-    "endDate": "2024-07-31"
-  }
-}
-```
-
-#### removeMilestoneToProject
-
-```graphql
-mutation RemoveMilestoneToProject($id: ID!) {
-  removeMilestoneToProject(id: $id) {
-    _id
-    projectId
-    milestoneId
-  }
-}
-```
-
-### Batch Mutations
-
-#### createAssignmentsForProject
-
-Creates multiple milestone assignments for a project:
-
-```graphql
-mutation CreateAssignmentsForProject(
-  $projectId: ID!
-  $milestoneIds: [ID!]!
-  $startDates: [String!]
-  $endDates: [String!]
-) {
-  createAssignmentsForProject(
-    projectId: $projectId
-    milestoneIds: $milestoneIds
-    startDates: $startDates
-    endDates: $endDates
-  )
-}
-```
-
-#### createMilestoneToProjectForProject
-
-Creates project assignments for a milestone:
-
-```graphql
-mutation CreateMilestoneToProjectForProject(
-  $milestoneId: ID!
-  $projectIds: [ID!]!
-  $startDates: [String!]
-  $endDates: [String!]
-) {
-  createMilestoneToProjectForProject(
-    milestoneId: $milestoneId
-    projectIds: $projectIds
-    startDates: $startDates
-    endDates: $endDates
-  )
-}
-```
-
-#### updateAssignmentsForProject
-
-Replaces all milestone assignments for a project:
-
-```graphql
-mutation UpdateAssignmentsForProject(
-  $projectId: ID!
-  $milestoneIds: [ID!]!
-  $startDates: [String!]
-  $endDates: [String!]
-) {
-  updateAssignmentsForProject(
-    projectId: $projectId
-    milestoneIds: $milestoneIds
-    startDates: $startDates
-    endDates: $endDates
-  )
-}
-```
-
-#### updateMilestoneToProjectForProject
-
-Replaces all project assignments for a milestone:
-
-```graphql
-mutation UpdateMilestoneToProjectForProject(
-  $milestoneId: ID!
-  $projectIds: [ID!]!
-  $startDates: [String!]
-  $endDates: [String!]
-) {
-  updateMilestoneToProjectForProject(
-    milestoneId: $milestoneId
-    projectIds: $projectIds
-    startDates: $startDates
-    endDates: $endDates
-  )
-}
-```
-
-#### deleteAssignmentsForProject
-
-```graphql
-mutation DeleteAssignmentsForProject($projectId: ID!) {
-  deleteAssignmentsForProject(projectId: $projectId)
-}
-```
-
-#### deleteMilestoneToProjectForProject
-
-```graphql
-mutation DeleteMilestoneToProjectForProject($milestoneId: ID!) {
-  deleteMilestoneToProjectForProject(milestoneId: $milestoneId)
-}
-```
+| Field | On | Returns | Description |
+|-------|-----|---------|-------------|
+| `project` | `MilestoneToProject` | `Project` (stub) | `@CheckFieldView` enforced |
+| `milestone` | `MilestoneToProject` | `Milestone` (stub) | `@CheckFieldView` enforced |
 
 ## RPC Patterns
 
-### Message Patterns
+### MessagePattern Handlers
 
-| Pattern | Payload | Response |
-|---------|---------|----------|
-| `FIND_MILESTONE_TO_PROJECT_BY_PROJECT_ID` | `projectId: string` | `MilestoneToProject[]` |
-| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` | `milestoneId: string` | `MilestoneToProject[]` |
-| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_IDS` | `milestoneIds: string[]` | `MilestoneToProject[]` |
-| `CREATE_MILESTONE_TO_PROJECT` | `{ milestoneId, projectId, startDate?, endDate? }` | `MilestoneToProject` |
+| Pattern | Input | Output |
+|---------|-------|--------|
+| `FIND_MILESTONE_TO_PROJECT_BY_PROJECT_ID` | `string` | assignments |
+| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` | `string` | assignments |
+| `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_IDS` | `string[]` | assignments |
+| `CREATE_MILESTONE_TO_PROJECT` | `{milestoneId, projectId, startDate?, endDate?}` | assignment |
 
-### Event Patterns
+### EventPattern Handlers
 
-| Pattern | Payload | Source |
-|---------|---------|--------|
-| `PROJECT_CREATED` | `{ projectId, assignedMilestoneIds }` | Projects |
-| `PROJECT_UPDATED` | `{ projectId, assignedMilestoneIds }` | Projects |
-| `PROJECT_DELETED` | `{ projectId }` | Projects |
-| `MILESTONE_CREATED` | `{ milestoneId, assignedProjectIds, assignmentStartDates, assignmentEndDates }` | Milestones |
-| `MILESTONE_UPDATED` | `{ milestoneId, assignedProjectIds, assignmentStartDates, assignmentEndDates }` | Milestones |
-| `MILESTONE_DELETED` | `{ milestoneId }` | Milestones |
-| `PERMISSIONS_CHANGED` | `{ groupIds }` | Grants |
+| Pattern | Input | Action |
+|---------|-------|--------|
+| `PROJECT_CREATED` | `{projectId, assignedMilestoneIds}` | Create assignments |
+| `PROJECT_UPDATED` | `{projectId, assignedMilestoneIds}` | Sync assignments |
+| `PROJECT_DELETED` | `{projectId}` | Delete all assignments |
+| `MILESTONE_CREATED` | `{milestoneId, assignedProjectIds, startDates?, endDates?}` | Create assignments |
+| `MILESTONE_UPDATED` | `{milestoneId, assignedProjectIds, startDates?, endDates?}` | Sync assignments |
+| `MILESTONE_DELETED` | `{milestoneId}` | Delete all assignments |
+| `PERMISSIONS_CHANGED` | `{groupIds}` | Invalidate cache |
 
-## Business Rules
+## Business Logic
 
-### Date Overrides
+### Assignment Sync
 
-Each assignment can override the milestone's default dates:
-- `startDate` and `endDate` are optional
-- If not specified, the milestone's dates are used
-- Allows per-project date ranges for shared milestones
+When milestones or projects are updated with new assignment lists, the service performs a **diff-based sync**:
+1. Find current assignments
+2. Delete assignments not in the new list
+3. Create assignments for new IDs
+4. Preserve existing assignments that remain
 
-### Duplicate Handling
+### Date Override
 
-The service handles duplicates gracefully:
-- Duplicate assignments are silently ignored on insert
-- Uses `insertMany` with `ordered: false`
-
-## Field Resolvers
-
-### project
-
-Returns a federation reference to the Project entity:
-
-```typescript
-@ResolveField(() => Project, { nullable: true })
-async project(@Parent() assignment: MilestoneToProject): Promise<Project | null> {
-  if (!assignment.projectId) return null;
-  return { __typename: 'Project', _id: assignment.projectId } as Project;
-}
-```
-
-### milestone
-
-Returns a federation reference to the Milestone entity:
-
-```typescript
-@ResolveField(() => Milestone, { nullable: true })
-async milestone(@Parent() assignment: MilestoneToProject): Promise<Milestone | null> {
-  if (!assignment.milestoneId) return null;
-  return { __typename: 'Milestone', _id: assignment.milestoneId } as Milestone;
-}
-```
-
-## Configuration
-
-### Environment Variables
-
-```ini
-# Service Config
-MILESTONE_TO_PROJECT_SERVICE_NAME=milestone-to-project
-MILESTONE_TO_PROJECT_SERVICE_PORT=3006
-MILESTONE_TO_PROJECT_DB_HOST=milestone-to-project-db
-MILESTONE_TO_PROJECT_DB_PORT=9006
-
-# MongoDB
-MONGODB_URI=mongodb://milestone-to-project-db:27017/milestone-to-project
-
-# Dependencies
-MILESTONE_TO_PROJECT_DEPENDENCIES=[]
-
-# Redis
-REDIS_SERVICE_HOST=redis
-REDIS_SERVICE_TLS_PORT=6380
-```
-
-## File Structure
-
-```
-apps/milestone-to-project/
-├── src/
-│   ├── main.ts
-│   ├── milestone-to-project.module.ts
-│   ├── milestone-to-project.controller.ts   # RPC handlers
-│   ├── milestone-to-project.resolver.ts     # GraphQL queries/mutations
-│   ├── milestone-to-project.service.ts      # Business logic
-│   ├── m2p-context.ts                       # Subgraph context
-│   ├── schemas/
-│   │   └── milestone-to-project.schema.ts
-│   ├── entities/
-│   │   ├── project.entity.ts
-│   │   └── milestone.entity.ts
-│   └── dto/
-│       ├── create-milestone-to-project.input.ts
-│       ├── update-milestone-to-project.input.ts
-│       ├── filter-milestone-to-project.input.ts
-│       └── paginated-milestone-to-project.output.ts
-├── Dockerfile
-└── README.md
-```
-
-## Next Steps
-
-- [Projects Service](/services/projects) - Project management
-- [Milestones Service](/services/milestones) - Milestone management
-- [MilestoneToUser Service](/services/milestone-to-user) - User-milestone relationships
+Each M2P record can have its own `startDate` and `endDate` that differ from the parent milestone's planned dates. This allows flexible scheduling when the same milestone participates in multiple projects with different timelines.

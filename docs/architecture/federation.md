@@ -1,395 +1,280 @@
-# Apollo Federation
+# Apollo Federation 2
 
-Cucu uses Apollo Federation 2 to compose a distributed GraphQL graph from multiple subgraph services.
+Cucu uses **Apollo Federation 2** to compose a unified GraphQL schema from 11 subgraph services. The Gateway runs `IntrospectAndCompose` to dynamically discover and compose subgraph schemas.
 
-## Overview
+## Gateway Composition
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    Apollo Gateway                             │
-│                 IntrospectAndCompose                          │
-│                                                               │
-│  Supergraph = Auth + Users + Grants + Projects + ...         │
-└──────────────────────────────────────────────────────────────┘
-       │              │              │              │
-       ▼              ▼              ▼              ▼
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-│ Auth     │  │ Users    │  │ Grants   │  │ Projects │
-│ Subgraph │  │ Subgraph │  │ Subgraph │  │ Subgraph │
-└──────────┘  └──────────┘  └──────────┘  └──────────┘
-```
-
-## Gateway Configuration
-
-The gateway uses `IntrospectAndCompose` to dynamically build the supergraph from running subgraphs:
+The Gateway configures Apollo Federation via `ApolloGatewayDriver` with `IntrospectAndCompose`:
 
 ```typescript
-// apps/gateway/src/app.module.ts
-GraphQLModule.forRootAsync<ApolloGatewayDriverConfig>({
-  driver: ApolloGatewayDriver,
-  useFactory: async (configService: ConfigService) => {
-    const subgraphs = [
-      { name: 'auth', url: `http://auth:3001/graphql` },
-      { name: 'users', url: `http://users:3002/graphql` },
-      { name: 'grants', url: `http://grants:3010/graphql` },
-      // ... other subgraphs
-    ];
-
-    return {
-      gateway: {
-        supergraphSdl: new IntrospectAndCompose({ subgraphs }),
-        buildService({ url }) {
-          return new RemoteGraphQLDataSource({
-            url,
-            willSendRequest({ request, context }) {
-              // Add signed headers to subgraph requests
-              if (context.req?.user) {
-                request.http.headers.set('x-user-id', context.req.user.sub);
-                request.http.headers.set('x-user-groups',
-                  context.req.user.groups.join(','));
-                request.http.headers.set('x-gateway-signature',
-                  signHeaders(context.req.user));
-              }
-            },
-          });
-        },
-      },
-    };
-  },
-});
-```
-
-## Federation Directives
-
-### @key
-
-Defines the primary key for an entity, enabling cross-service resolution:
-
-```typescript
-// apps/users/src/schemas/user.schema.ts
-@ObjectType()
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-export class User {
-  @Field(() => ID)
-  _id: string;
-
-  @Field(() => AuthDataSchema, { nullable: true })
-  authData?: AuthDataSchema;
-
-  // ... other fields
-}
-```
-
-### @extends
-
-Indicates that a type is defined in another service but extended here:
-
-```typescript
-// apps/milestone-to-user/src/entities/user.entity.ts
-@ObjectType()
-@Directive('@extends')
-@Directive('@key(fields: "_id")')
-export class User {
-  @Field(() => ID)
-  @Directive('@external')
-  _id: string;
-}
-```
-
-### @external
-
-Marks a field as defined in another service (used with @extends):
-
-```typescript
-@Field(() => ID)
-@Directive('@external')
-_id: string;
-```
-
-## ResolveReference
-
-Resolves an entity reference from another service:
-
-```typescript
-// apps/users/src/users.resolver.ts
-@Resolver(() => User)
-export class UsersResolver {
-  constructor(private readonly usersService: UsersService) {}
-
-  @ResolveReference()
-  async resolveReference(ref: { __typename: string; _id: string }) {
-    // Called when another service references a User by _id
-    return this.usersService.findById(ref._id);
-  }
-}
-```
-
-### How It Works
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│ Query: { milestoneToUser(id: "...") { user { name email } } }  │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ MilestoneToUser Service returns:                               │
-│ {                                                               │
-│   _id: "m2u-123",                                              │
-│   userId: "user-456",                                          │
-│   user: { __typename: "User", _id: "user-456" }  ◄── stub      │
-│ }                                                               │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ Gateway detects unresolved reference                           │
-│ Calls Users service: resolveReference({ _id: "user-456" })     │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ Users Service returns full User entity:                        │
-│ { _id: "user-456", authData: { name: "John", email: "..." } }  │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ Gateway merges and returns final response                      │
-└────────────────────────────────────────────────────────────────┘
-```
-
-## ResolveField
-
-Resolves a specific field, often by calling another service via RPC:
-
-```typescript
-// apps/users/src/users.resolver.ts
-@ResolveField(() => [MilestoneToUser], { nullable: true })
-@CheckFieldView('User', 'milestones')
-async milestones(@Parent() user: User): Promise<MilestoneToUser[]> {
-  // Call MilestoneToUser service via RPC
-  const rows = await lastValueFrom(
-    this.milestoneToUserClient.send<{ _id: string }[]>(
-      'FIND_MILESTONE_TO_USER_BY_USER_ID',
-      user._id
-    )
-  );
-
-  // Return stubs for federation resolution
-  return rows.map(r => ({
-    __typename: 'MilestoneToUser',
-    _id: r._id
+// gateway/src/config/subgraphs.config.ts
+export function getSubgraphs(configService: ConfigService) {
+  const protocol = configService.get<string>('HTTP_PROTOCOL');
+  const services = [
+    { nameKey: 'AUTH_SERVICE_NAME', hostKey: 'AUTH_SERVICE_HOST', portKey: 'AUTH_SERVICE_PORT' },
+    { nameKey: 'USERS_SERVICE_NAME', ... },
+    { nameKey: 'MILESTONES_SERVICE_NAME', ... },
+    { nameKey: 'PROJECTS_SERVICE_NAME', ... },
+    { nameKey: 'GRANTS_SERVICE_NAME', ... },
+    { nameKey: 'GROUP_ASSIGNMENTS_SERVICE_NAME', ... },
+    { nameKey: 'MILESTONE_TO_USER_SERVICE_NAME', ... },
+    { nameKey: 'MILESTONE_TO_PROJECT_SERVICE_NAME', ... },
+    { nameKey: 'PROJECT_ACCESS_SERVICE_NAME', ... },
+    { nameKey: 'ORGANIZATION_SERVICE_NAME', ... },
+    { nameKey: 'TENANTS_SERVICE_NAME', ... },
+  ];
+  return services.map(({ nameKey, hostKey, portKey }) => ({
+    name: configService.get(nameKey),
+    url: `${protocol}://${configService.get(hostKey) || configService.get(nameKey)}:${configService.get(portKey)}/graphql`,
   }));
 }
+```
+
+Each subgraph uses `ApolloFederationDriver` with `autoSchemaFile` for automatic schema generation:
+
+```typescript
+GraphQLModule.forRoot<ApolloFederationDriverConfig>({
+  driver: ApolloFederationDriver,
+  autoSchemaFile: { path: 'schema.gql', federation: 2 },
+  buildSchemaOptions: { orphanedTypes: [...] },
+  fieldResolverEnhancers: ['interceptors', 'filters'],
+});
 ```
 
 ## Entity Ownership
 
-Each service owns certain entities:
+Each entity is owned by exactly one service (marked with `@Directive('@key(fields: "_id")')`):
 
-| Service | Owned Entities |
-|---------|---------------|
-| **Users** | User, AuthDataSchema, PersonalDataSchema, EmploymentDataSchema |
-| **Auth** | Session |
-| **Grants** | Group, Permission, OperationPermission, PagePermission |
-| **Projects** | Project |
-| **Milestones** | Milestone |
-| **MilestoneToUser** | MilestoneToUser (UserAssignment) |
-| **MilestoneToProject** | MilestoneToProject (ProjectAssignment) |
-| **GroupAssignments** | GroupAssignment |
-| **Organization** | SeniorityLevel, JobRole, RoleCategory, Company |
+| Entity | Owner Service | Key Field |
+|--------|--------------|-----------|
+| `User` | users | `_id` |
+| `Session` | auth | `_id` |
+| `Group` | grants | `_id` |
+| `Permission` | grants | `_id` |
+| `OperationPermission` | grants | `_id` |
+| `PagePermission` | grants | `_id` |
+| `GroupAssignment` | group-assignments | `_id` |
+| `Milestone` | milestones | `_id` |
+| `MilestoneToUser` | milestone-to-user | `_id` |
+| `MilestoneToProject` | milestone-to-project | `_id` |
+| `Project` | projects | `_id` |
+| `ProjectTemplate` | projects | `_id` |
+| `ProjectTemplatePhase` | projects | `_id` |
+| `ProjectAccess` | project-access | `_id` |
+| `SeniorityLevel` | organization | `_id` |
+| `JobRole` | organization | `_id` |
+| `Company` | organization | `_id` |
+| `RoleCategory` | organization | `_id` |
+| `HolidayCalendar` | projects | `_id` |
+| `Tenant` | tenants | `_id` |
+| `ResourceDailyAllocation` | milestone-to-user | `_id` |
 
-## Service Description Convention
+## Entity References and Cross-Service Resolution
 
-Operations include `serviceName` in their description for introspection:
+### The Pattern
+
+When Service A needs to return an entity owned by Service B, it returns a **federation entity reference** — a stub with only `__typename` and the key field. Apollo's query planner then calls Service B's `resolveReference()` to fill in the full entity.
 
 ```typescript
-@Query(() => User, {
-  name: 'findOneUser',
-  description: 'serviceName=User'
-})
-async findOneUser(/* ... */): Promise<User>
+// In Users resolver — returning Milestone entity stubs
+@ResolveField(() => [MilestoneToUser], { nullable: true })
+async milestones(@Parent() user: User): Promise<MilestoneToUser[]> {
+  const rows = await lastValueFrom(
+    this.mt2u.send('FIND_MILESTONE_TO_USER_BY_USER_ID', user._id)
+  );
+  // Return stubs — federation resolves the rest
+  return rows.map(r => ({ __typename: 'MilestoneToUser', _id: r._id }));
+}
 ```
 
-This enables the Grants service to discover operations by entity:
-
 ```typescript
-// Query operations for "User" entity
-const operations = await this.grantsClient.send(
-  'listQueryFromGateway',
-  { serviceName: 'User' }
-);
-// Returns: ['findAllUsers', 'findOneUser', 'findDeletedUsers', ...]
+// In MilestoneToUser resolver — resolveReference fills the entity
+@ResolveReference()
+async resolveReference(ref: { __typename: string; _id: string }) {
+  return this.milestoneToUserService.findByIdForFederation(ref._id);
+}
 ```
 
-## Subgraph Module Configuration
+### Federation Entity Stubs (orphanedTypes)
 
-Each subgraph configures GraphQL with federation enabled:
-
-```typescript
-// apps/users/src/users.module.ts
-GraphQLModule.forRoot<ApolloFederationDriverConfig>({
-  driver: ApolloFederationDriver,
-  context: ({ req }) => ({ req }),
-  autoSchemaFile: {
-    path: 'schema.gql',
-    federation: 2,  // Enable Federation 2
-  },
-  buildSchemaOptions: {
-    // Orphaned types that need explicit inclusion
-    orphanedTypes: [JobRoleEntity, SeniorityLevelEntity, CompanyEntity],
-  },
-  fieldResolverEnhancers: ['interceptors', 'filters'],
-})
-```
-
-## Cross-Service Entity Resolution
-
-When a service needs to reference an entity from another service:
-
-### 1. Create Entity Stub
+Services declare entity stubs for types they reference but don't own. These are registered as `orphanedTypes`:
 
 ```typescript
-// apps/users/src/entities/job-role.entity.ts
+// In users module — stubs for organization entities
+buildSchemaOptions: {
+  orphanedTypes: [JobRoleEntity, SeniorityLevelEntity, CompanyEntity],
+},
+
+// Entity stub example:
 @ObjectType()
-@Directive('@extends')
 @Directive('@key(fields: "_id")')
 export class JobRole {
   @Field(() => ID)
-  @Directive('@external')
   _id: string;
 }
 ```
 
-### 2. Add to Orphaned Types
+## Cross-Service Field Resolution Map
+
+```mermaid
+graph LR
+    subgraph Users Service
+        U[User] -->|milestones| M2U_stub[MilestoneToUser stub]
+        U -->|subordinates| U_sub[User self-reference]
+        U -->|groupIds| GA_call[GroupAssignments RPC]
+    end
+    
+    subgraph "Users → Organization"
+        U -->|seniorityLevel| SL[SeniorityLevel stub]
+        U -->|jobRoles| JR[JobRole stubs]
+        U -->|company| CO[Company stub]
+    end
+    
+    subgraph Auth Service
+        S[Session] -->|user| U_stub[User stub]
+    end
+    
+    subgraph Milestones Service
+        M[Milestone] -->|users| M2U_stub2[MilestoneToUser stubs]
+        M[Milestone] -->|projects| M2P_stub[MilestoneToProject stubs]
+    end
+    
+    subgraph MilestoneToUser Service
+        MTU[MilestoneToUser] -->|user| U_stub2[User stub]
+        MTU -->|milestone| M_stub[Milestone stub]
+        MTU -->|roleCategory| RC_stub[RoleCategory stub]
+    end
+    
+    subgraph MilestoneToProject Service
+        MTP[MilestoneToProject] -->|project| P_stub[Project stub]
+        MTP -->|milestone| M_stub2[Milestone stub]
+    end
+    
+    subgraph Projects Service
+        P[Project] -->|milestones| M2P_stub2[MilestoneToProject stubs]
+    end
+    
+    subgraph GroupAssignments Service
+        GA[GroupAssignment] -->|user| U_stub3[User stub]
+        GA[GroupAssignment] -->|group| G_stub[Group stub]
+        G2[Group] -->|usageCount| GA_count[count query]
+    end
+    
+    subgraph ProjectAccess Service
+        PA[ProjectAccess] -->|project| P_stub2[Project stub]
+        PA -->|user| U_stub4[User stub]
+    end
+    
+    subgraph Organization Service
+        JR2[JobRole] -->|roleCategory| RC2[RoleCategory]
+        SL2[SeniorityLevel] -->|usageCount| Users_RPC[Users RPC]
+        JR2 -->|usageCount| Users_RPC2[Users RPC]
+        CO2[Company] -->|usageCount| Users_RPC3[Users RPC]
+    end
+```
+
+## ResolveField Details by Service
+
+### Users → Organization (AdditionalFieldsResolver)
+
+The `AdditionalFieldsResolver` resolves organization lookup references on the User's `additionalFieldsData`:
 
 ```typescript
-buildSchemaOptions: {
-  orphanedTypes: [JobRoleEntity, SeniorityLevelEntity, CompanyEntity],
+@Resolver(() => AdditionalFieldsDataSchema)
+export class AdditionalFieldsResolver {
+  @ResolveField(() => SeniorityLevel, { nullable: true })
+  async seniorityLevel(@Parent() data: AdditionalFieldsDataSchema) {
+    if (!data.seniorityLevelId) return null;
+    // Federation reference — resolved by Organization service
+    return { __typename: 'SeniorityLevel', _id: data.seniorityLevelId };
+  }
+
+  @ResolveField(() => [JobRole], { nullable: true })
+  async jobRoles(@Parent() data: AdditionalFieldsDataSchema) {
+    if (!data.jobRoleIds?.length) return [];
+    return data.jobRoleIds.map(id => ({ __typename: 'JobRole', _id: id }));
+  }
+
+  @ResolveField(() => Company, { nullable: true })
+  async company(@Parent() data: AdditionalFieldsDataSchema) {
+    if (!data.companyId) return null;
+    return { __typename: 'Company', _id: data.companyId };
+  }
 }
 ```
 
-### 3. Resolve via RPC + Stub Return
+### GroupAssignments → Group (usageCount)
+
+The GroupAssignments service extends the `Group` entity (owned by Grants) with a `usageCount` field:
 
 ```typescript
-@ResolveField(() => [JobRole], { nullable: true })
-async jobRoles(@Parent() parent: AdditionalFieldsDataSchema): Promise<JobRole[]> {
-  if (!parent.jobRoleIds?.length) return [];
-
-  const results = await lastValueFrom(
-    this.organizationClient.send('FIND_JOB_ROLES_BY_IDS', parent.jobRoleIds)
-  );
-
-  // Return stubs for federation
-  return results.map(r => ({
-    __typename: 'JobRole',
-    _id: r._id.toString()
-  }));
+@Resolver(() => Group)
+export class GroupResolver {
+  @ResolveField(() => Int, { name: 'usageCount', nullable: true })
+  async resolveUsageCount(@Parent() group: Group): Promise<number> {
+    return this.service.countByGroupId(group._id);
+  }
 }
+```
+
+## Request Flow Through Federation
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway
+    participant Users as Users Subgraph
+    participant M2U as MilestoneToUser Subgraph
+    participant Milestones as Milestones Subgraph
+
+    Client->>Gateway: query { findOneUser(userId: "X") { authData { name } milestones { milestone { milestoneBasicData { name } } } } }
+    
+    Gateway->>Gateway: Query plan: 1) Users for base fields + milestone stubs
+    Gateway->>Users: findOneUser(userId: "X") → authData.name + milestones RPC
+    Users->>M2U: RPC FIND_MILESTONE_TO_USER_BY_USER_ID
+    M2U-->>Users: [{_id: "m2u1"}, {_id: "m2u2"}]
+    Users-->>Gateway: { authData: {name: "John"}, milestones: [{__typename: "MilestoneToUser", _id: "m2u1"}, ...] }
+    
+    Gateway->>Gateway: Query plan: 2) MilestoneToUser for full entities
+    Gateway->>M2U: __resolveReference({_id: "m2u1"}) → milestoneId, milestone stub
+    M2U-->>Gateway: { milestoneId: "ms1", milestone: {__typename: "Milestone", _id: "ms1"} }
+    
+    Gateway->>Gateway: Query plan: 3) Milestones for milestone data
+    Gateway->>Milestones: __resolveReference({_id: "ms1"}) → milestoneBasicData.name
+    Milestones-->>Gateway: { milestoneBasicData: {name: "Phase 1"} }
+    
+    Gateway-->>Client: Composed response
 ```
 
 ## Header Propagation
 
-The gateway adds signed headers to all subgraph requests:
+The Gateway's `RemoteGraphQLDataSource.willSendRequest()` handles two scenarios:
+
+### Authenticated User Requests
+
+```
+Bearer token → CHECK_SESSION → extract userId + groupIds
+→ Strip Authorization header
+→ Set: x-user-groups, x-user-id, x-tenant-slug, x-tenant-id
+→ HMAC sign all headers → x-gateway-signature
+```
+
+### Internal Federation Calls
+
+```
+No Bearer token → get M2M token from Keycloak
+→ Set: Authorization: Bearer {m2mToken}, x-internal-federation-call: 1
+→ Propagate user context if triggered by user request (Scenario D)
+→ Propagate tenant context from user JWT or request headers
+→ HMAC sign all headers → x-gateway-signature
+```
+
+## Introspection Control
+
+Production environments disable GraphQL introspection:
 
 ```typescript
-// apps/gateway/src/app.module.ts - buildService
-willSendRequest({ request, context }) {
-  const user = context.req?.user;
-  if (user) {
-    const userGroups = user.groups?.join(',') ?? '';
-    const userId = user.sub ?? '';
-
-    request.http.headers.set('x-user-id', userId);
-    request.http.headers.set('x-user-groups', userGroups);
-    request.http.headers.set('x-internal-federation-call', '1');
-
-    // HMAC signature for verification
-    const payload = `${userGroups}|1|${userId}`;
-    const signature = createHmac('sha256', INTERNAL_HEADER_SECRET)
-      .update(payload)
-      .digest('hex');
-    request.http.headers.set('x-gateway-signature', signature);
-  }
-}
+// gateway/src/plugins/disable-introspection.plugin.ts
+introspection: allowIntrospection, // controlled by ALLOW_INTROSPECTION env
+plugins: allowIntrospection ? [] : [disableIntrospectionPlugin()],
 ```
-
-## Best Practices
-
-### 1. Always Return Stubs for Federation
-
-```typescript
-// GOOD: Return stub for federation resolution
-return { __typename: 'User', _id: userId };
-
-// BAD: Return full object (bypasses federation)
-return await this.usersService.findById(userId);
-```
-
-### 2. Use @key for All Entities
-
-Every shared entity must have a federation key:
-
-```typescript
-@Directive('@key(fields: "_id")')
-export class User { /* ... */ }
-```
-
-### 3. Keep Stubs Minimal
-
-Stub entities should only include the `@key` field:
-
-```typescript
-// apps/milestone-to-user/src/entities/user.entity.ts
-@ObjectType()
-@Directive('@extends')
-@Directive('@key(fields: "_id")')
-export class User {
-  @Field(() => ID)
-  @Directive('@external')
-  _id: string;  // Only the key field
-}
-```
-
-### 4. Include Orphaned Types
-
-Any stub type must be in `orphanedTypes`:
-
-```typescript
-buildSchemaOptions: {
-  orphanedTypes: [UserEntity, MilestoneEntity, GroupEntity],
-}
-```
-
-## Debugging Federation
-
-### Check Subgraph Schema
-
-```bash
-curl http://localhost:3002/graphql -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ _service { sdl } }"}'
-```
-
-### Introspect Gateway
-
-```graphql
-query {
-  __schema {
-    types {
-      name
-      fields {
-        name
-        type { name }
-      }
-    }
-  }
-}
-```
-
-## Next Steps
-
-- [Service Communication](/architecture/communication) - RPC patterns used in field resolvers
-- [Permission System](/architecture/permissions) - Field-level permission checks

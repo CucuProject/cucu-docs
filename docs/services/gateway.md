@@ -1,449 +1,134 @@
 # Gateway Service
 
-The Gateway is the **single entry point** for the Cucu platform, handling authentication, federation composition, and request routing.
+The Gateway is the **single entry point** for all client traffic. It runs Apollo Federation 2 to compose a unified GraphQL schema from 11 subgraphs, handles REST authentication endpoints, validates JWT tokens, and forwards signed headers to subgraphs.
 
 ## Overview
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3000 |
-| **Role** | Apollo Federation Gateway, Authentication |
-| **Dependencies** | Auth, Users, Grants, all subgraph services |
+| Port | 3000 |
+| Database | None (stateless) |
+| Transport | HTTP only (no Redis RPC handlers) |
+| Module | `AppModule` |
+| Entry | `gateway/src/main.ts` |
+
+The Gateway does **not** use `createSubgraphMicroservice()` — it has a custom bootstrap. It connects to Redis only as a **client** (for `send()`/`emit()` to other services), never as a listener.
+
+## Architecture
+
+### Module Structure
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Gateway (:3000)                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                       Apollo Federation                                │ │
-│  │  IntrospectAndCompose → Supergraph from all subgraphs                │ │
-│  │  /graphql endpoint                                                     │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                       Authentication                                    │ │
-│  │  GlobalAuthGuard → JwtStrategy → CHECK_SESSION                        │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │                       REST Endpoints                                    │ │
-│  │  POST /auth/login                                                      │ │
-│  │  POST /auth/refresh                                                    │ │
-│  │  POST /auth/logout                                                     │ │
-│  │  POST /auth/force-revoke                                               │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+AppModule
+├── ConfigModule (global)
+├── MicroservicesOrchestratorModule
+├── PassportModule (defaultStrategy: 'jwt')
+├── ThrottlerModule (60 req/60s global)
+├── KeycloakGatewayM2mModule (machine-to-machine tokens for federation)
+├── RedisClientsModule (9 service clients)
+└── GraphQLModule (ApolloGatewayDriver + IntrospectAndCompose)
+
+Controllers:
+├── AuthController (REST: login, refresh, logout, verify, discover, switch)
+└── IntrospectionController
+
+Providers:
+├── ApolloGatewayProvider
+├── JwtStrategy (Passport)
+├── GlobalAuthGuard (APP_GUARD)
+└── ThrottlerGuard (APP_GUARD)
 ```
 
-## Configuration
+### Redis Clients
 
-### Environment Variables
+The Gateway registers clients for all services it needs to call via RPC:
 
-```ini
-# Service Config
-GATEWAY_SERVICE_NAME=gateway
-GATEWAY_SERVICE_PORT=3000
+- `AUTH_SERVICE` — session management (CHECK_SESSION, REVOKE_SESSION, etc.)
+- `TENANTS_SERVICE` — identity verification, tenant discovery
+- `GRANTS_SERVICE` — unused directly, available for future use
+- `USERS_SERVICE`, `MILESTONE_TO_USER_SERVICE`, `MILESTONES_SERVICE`, `PROJECTS_SERVICE`, `MILESTONE_TO_PROJECT_SERVICE`, `GROUP_ASSIGNMENTS_SERVICE`
 
-# Redis Transport
-REDIS_SERVICE_HOST=redis
-REDIS_SERVICE_TLS_PORT=6380
-GATEWAY_REDIS_TLS_CLIENT_CERT=/certs/gateway.crt
-GATEWAY_REDIS_TLS_CLIENT_KEY=/certs/gateway.key
-REDIS_TLS_CA_CERT=/certs/ca.crt
+## REST Endpoints
 
-# Subgraph URLs
-HTTP_PROTOCOL=http
-AUTH_SERVICE_NAME=auth
-AUTH_SERVICE_PORT=3001
-USERS_SERVICE_NAME=users
-USERS_SERVICE_PORT=3002
-GRANTS_SERVICE_NAME=grants
-GRANTS_SERVICE_PORT=3010
-# ... all other services
-
-# JWT (must match Auth service)
-JWT_SECRET=ProdSecretKey
-
-# HMAC Security
-INTERNAL_HEADER_SECRET=cucu-dev-hmac-change-me-in-production
-
-# Refresh Cookie
-REFRESH_COOKIE_NAME=__Host-rf
-REFRESH_COOKIE_DOMAIN=localhost
-REFRESH_COOKIE_SECURE=true
-REFRESH_COOKIE_SAMESITE=strict
-REFRESH_COOKIE_MAXAGE=7d
-```
-
-## Apollo Federation Setup
-
-```typescript
-// apps/gateway/src/app.module.ts
-@Module({
-  imports: [
-    GraphQLModule.forRootAsync<ApolloGatewayDriverConfig>({
-      driver: ApolloGatewayDriver,
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => {
-        const protocol = configService.get('HTTP_PROTOCOL', 'http');
-
-        const subgraphs = [
-          {
-            name: 'auth',
-            url: `${protocol}://${configService.get('AUTH_SERVICE_NAME')}:${configService.get('AUTH_SERVICE_PORT')}/graphql`,
-          },
-          {
-            name: 'users',
-            url: `${protocol}://${configService.get('USERS_SERVICE_NAME')}:${configService.get('USERS_SERVICE_PORT')}/graphql`,
-          },
-          // ... other subgraphs
-        ];
-
-        return {
-          gateway: {
-            supergraphSdl: new IntrospectAndCompose({ subgraphs }),
-            buildService({ url }) {
-              return new AuthenticatedDataSource({ url });
-            },
-          },
-        };
-      },
-    }),
-  ],
-})
-export class AppModule {}
-```
-
-## Header Propagation
-
-The gateway adds signed headers to all subgraph requests:
-
-```typescript
-// apps/gateway/src/graphql/authenticated-datasource.ts
-export class AuthenticatedDataSource extends RemoteGraphQLDataSource {
-  willSendRequest({ request, context }: GraphQLDataSourceProcessOptions) {
-    const user = context.req?.user;
-
-    if (user) {
-      const userGroups = user.groups?.join(',') ?? '';
-      const userId = user.sub ?? '';
-
-      // Add user context headers
-      request.http.headers.set('x-user-id', userId);
-      request.http.headers.set('x-user-groups', userGroups);
-      request.http.headers.set('x-internal-federation-call', '1');
-
-      // Sign headers with HMAC
-      const payload = `${userGroups}|1|${userId}`;
-      const signature = createHmac('sha256', INTERNAL_HEADER_SECRET)
-        .update(payload)
-        .digest('hex');
-      request.http.headers.set('x-gateway-signature', signature);
-    }
-  }
-}
-```
-
-## REST API Reference
-
-### POST /auth/login
-
-Authenticates a user and returns tokens.
-
-**Request:**
-```bash
-curl -X POST http://localhost:3000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "user@example.com",
-    "password": "password123"
-  }'
-```
-
-**Response:**
-```json
-{
-  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "userId": "645a9e3...",
-  "sessionId": "6460b2f...",
-  "expiresIn": 3600
-}
-```
-
-**Cookie Set:**
-```
-Set-Cookie: __Host-rf=<refreshToken>; HttpOnly; Secure; SameSite=Strict
-```
-
-### POST /auth/refresh
-
-Refreshes an expired access token.
-
-**Request:**
-```bash
-curl -X POST http://localhost:3000/auth/refresh \
-  -H "Cookie: __Host-rf=<refreshToken>"
-```
-
-**Response:**
-```json
-{
-  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "userId": "645a9e3...",
-  "sessionId": "6460b2f...",
-  "expiresIn": 3600
-}
-```
-
-### POST /auth/logout
-
-Revokes the current session.
-
-**Request:**
-```bash
-curl -X POST http://localhost:3000/auth/logout \
-  -H "Authorization: Bearer <accessToken>"
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Session revoked: 6460b2f..."
-}
-```
-
-### POST /auth/force-revoke
-
-Forcibly revokes another user's session (SUPERADMIN only).
-
-**Request:**
-```bash
-curl -X POST http://localhost:3000/auth/force-revoke \
-  -H "Authorization: Bearer <accessToken>" \
-  -H "Content-Type: application/json" \
-  -d '{ "targetSessionId": "6460b2f..." }'
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Session forcibly revoked: 6460b2f..."
-}
-```
+| Method | Path | Auth | Rate Limit | Purpose |
+|--------|------|------|-----------|---------|
+| `POST` | `/auth/login` | `@Public()` | 100/15min | Login via platform DB |
+| `POST` | `/auth/refresh` | `@Public()` | — | Token rotation via refresh cookie |
+| `POST` | `/auth/logout` | `GlobalAuthGuard` | — | Revoke session + clear cookie |
+| `GET` | `/auth/verify` | `@Public()` | — | Check refresh cookie validity |
+| `POST` | `/auth/discover` | `@Public()` | 10/1min | Find tenants for an email |
+| `POST` | `/auth/switch` | `GlobalAuthGuard` | — | Switch to different tenant |
+| `POST` | `/auth/force-revoke` | `GlobalAuthGuard` + SUPERADMIN | — | Revoke another user's session |
 
 ## Authentication Flow
 
 ### GlobalAuthGuard
 
-```typescript
-// apps/gateway/src/auth/global-auth.guard.ts
-@Injectable()
-export class GlobalAuthGuard extends AuthGuard('jwt') {
-  constructor(private reflector: Reflector) {
-    super();
-  }
+Applied globally via `APP_GUARD`. Extends Passport's `AuthGuard('jwt')`:
 
-  canActivate(context: ExecutionContext) {
-    // Check for public routes
-    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]);
-    if (isPublic) return true;
-
-    // Get request from HTTP or GraphQL context
-    const request = this.getRequest(context);
-    if (!request) return false;
-
-    // Delegate to JWT strategy
-    return super.canActivate(context);
-  }
-
-  private getRequest(context: ExecutionContext) {
-    if (context.getType() === 'http') {
-      return context.switchToHttp().getRequest();
-    }
-    const gqlCtx = GqlExecutionContext.create(context);
-    return gqlCtx.getContext().req;
-  }
-}
-```
+- Supports both HTTP and GraphQL contexts
+- Skips routes decorated with `@Public()` (via `IS_PUBLIC_KEY` reflector metadata)
+- On GraphQL, extracts request from `GqlExecutionContext.create(context).getContext().req`
 
 ### JwtStrategy
 
-```typescript
-// apps/gateway/src/auth/jwt.strategy.ts
-@Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(
-    @Inject('AUTH_SERVICE') private authClient: ClientProxy,
-    configService: ConfigService,
-  ) {
-    super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ignoreExpiration: false,
-      secretOrKey: configService.get('JWT_SECRET'),
-    });
-  }
+Passport strategy that validates every authenticated request:
 
-  async validate(payload: JwtPayload) {
-    // Validate session with Auth service
-    const sessionCheck = await lastValueFrom(
-      this.authClient.send<CheckSessionResponse>('CHECK_SESSION', {
-        sessionId: payload.sessionId,
-      })
-    );
+1. Extract Bearer token from `Authorization` header
+2. Verify JWT signature using `JWT_SECRET`
+3. Call `CHECK_SESSION` RPC to Auth service with `payload.sessionId`
+4. Return `{ sub: userId, sessionId, groups, tenantSlug, tenantId }` as `req.user`
 
-    if (!sessionCheck.isValid) {
-      throw new UnauthorizedException(sessionCheck.reason);
-    }
+## Apollo Federation Configuration
 
-    return {
-      sub: payload.sub,
-      sessionId: payload.sessionId,
-      groups: sessionCheck.groupIds || payload.groups,
-    };
-  }
-}
-```
+### RemoteGraphQLDataSource
 
-## GraphQL Endpoint
+The Gateway's `willSendRequest()` hook handles header propagation:
 
-Access the GraphQL playground at `http://localhost:3000/graphql`.
+**Authenticated user requests** (has Bearer token):
+1. Decode JWT to extract `sessionId`
+2. `CHECK_SESSION` RPC → get `userId`, `groupIds`
+3. Strip `Authorization` header (no forwarding of user JWTs to subgraphs)
+4. Set `x-user-groups`, `x-user-id`, `Content-Type`
+5. Propagate tenant context (`x-tenant-slug`, `x-tenant-id`) from JWT payload
 
-### Example Query
+**Federation/internal calls** (no Bearer token):
+1. Get M2M token from Keycloak
+2. Set `Authorization: Bearer {m2mToken}`, `x-internal-federation-call: 1`
+3. Propagate user context if the federation call was triggered by a user request
+4. Propagate tenant context from user JWT or request headers
 
-```graphql
-query {
-  findAllUsers(pagination: { limit: 10, page: 1 }) {
-    items {
-      _id
-      authData {
-        name
-        email
-      }
-      additionalFieldsData {
-        active
-        seniorityLevel {
-          _id
-          name
-        }
-      }
-    }
-    totalCount
-    hasNextPage
-  }
-}
-```
+**All requests**:
+1. Compute HMAC-SHA256 signature of all internal headers
+2. Set `x-gateway-signature` — subgraphs verify this before trusting any `x-*` headers
 
-### Example Mutation
-
-```graphql
-mutation {
-  createUser(createUserInput: {
-    authData: {
-      name: "John"
-      surname: "Doe"
-      email: "john.doe@example.com"
-      password: "SecurePass123!"
-    }
-    additionalFieldsData: {
-      active: true
-    }
-  }) {
-    _id
-    authData {
-      name
-      email
-    }
-  }
-}
-```
-
-## RPC Patterns Used
-
-| Pattern | Service | Purpose |
-|---------|---------|---------|
-| `LOGIN` | Auth | Process login request |
-| `REFRESH_SESSION` | Auth | Refresh access token |
-| `CHECK_SESSION` | Auth | Validate session on each request |
-| `REVOKE_SESSION` | Auth | Logout / force revoke |
-
-## Security Features
-
-### 1. JWT Validation
-
-- Tokens are validated on every request
-- Session is checked server-side via `CHECK_SESSION`
-- Invalid/expired sessions are rejected immediately
-
-### 2. HMAC Signature
-
-- All internal headers are signed with HMAC-SHA256
-- Subgraphs verify signature before trusting headers
-- Timing-safe comparison prevents timing attacks
-
-### 3. Refresh Token Security
-
-- Stored in httpOnly cookie (no JS access)
-- Secure flag requires HTTPS
-- SameSite=strict prevents CSRF
-- Tokens rotated on each refresh
-
-### 4. CORS Configuration
+### Introspection Control
 
 ```typescript
-// apps/gateway/src/main.ts
-app.enableCors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3001',
-  credentials: true, // Required for cookies
-});
+const allowIntrospection = configService.get('ALLOW_INTROSPECTION') === 'true';
+server: {
+  introspection: allowIntrospection,
+  plugins: allowIntrospection ? [] : [disableIntrospectionPlugin()],
+}
 ```
 
-## Troubleshooting
+## Key Design Decisions
 
-### "Subgraph not reachable"
+### Why REST for Auth?
 
-1. Check if the subgraph service is running
-2. Verify the service URL in environment variables
-3. Check Docker network connectivity
+Login, refresh, and logout use REST endpoints instead of GraphQL mutations because:
+1. **Cookies** — httpOnly refresh cookies must be set via HTTP response headers, not GraphQL
+2. **Simplicity** — auth flows are sequential, not graph-shaped
+3. **Standards** — CSRF protection patterns work better with REST
 
-### "Invalid signature"
+### Why Gateway Doesn't Listen on Redis?
 
-1. Verify `INTERNAL_HEADER_SECRET` matches across services
-2. Check that gateway is setting all required headers
+The Gateway only calls other services; no service calls the Gateway. It's a pure HTTP/GraphQL server and RPC client. This simplifies its architecture and avoids circular dependencies.
 
-### "Session not valid"
+### Why CHECK_SESSION on Every Request?
 
-1. Check Auth service logs for details
-2. Verify Redis connectivity
-3. Check session hasn't expired or been revoked
-
-## File Structure
-
-```
-apps/gateway/
-├── src/
-│   ├── main.ts                    # Entry point
-│   ├── app.module.ts              # Module configuration
-│   ├── app.controller.ts          # Health check endpoint
-│   ├── auth/
-│   │   ├── auth.controller.ts     # REST endpoints
-│   │   ├── jwt.strategy.ts        # JWT validation
-│   │   └── global-auth.guard.ts   # Request authentication
-│   └── graphql/
-│       └── authenticated-datasource.ts  # Header propagation
-├── Dockerfile
-└── README.md
-```
-
-## Next Steps
-
-- [Auth Service](/services/auth) - Session management
-- [Authentication Flow](/architecture/auth-flow) - Complete auth flow
-- [Federation](/architecture/federation) - How subgraphs compose
+Even though JWT tokens contain user claims, the Gateway validates sessions on every request via `CHECK_SESSION` RPC. This enables:
+- Instant session revocation (not waiting for JWT expiry)
+- Real-time group membership updates
+- Session idle timeout enforcement
+- `lastActivity` tracking for session keep-alive

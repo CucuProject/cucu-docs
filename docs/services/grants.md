@@ -1,569 +1,235 @@
 # Grants Service
 
-The Grants service manages **groups, permissions, and access control** for the Cucu platform.
+The Grants service is the **permission engine** of the platform. It stores and manages Groups, field-level Permissions, operation-level OperationPermissions, and page-level PagePermissions. Every other service queries Grants to determine what the current user can do and see.
 
 ## Overview
 
 | Property | Value |
 |----------|-------|
-| **Port** | 3010 |
-| **Database** | grants-db (MongoDB, port 9010) |
-| **Role** | Permission management, group management |
-| **Dependencies** | None (core service) |
+| Port | 3010 |
+| Database | `grants_{tenantSlug}` |
+| Collections | `groups`, `permissions`, `operationpermissions`, `pagepermissions` |
+| Module | `GrantsModule` |
+| Context | `GrantsContext` (request-scoped) |
 
-## Entities
+## Architecture
+
+### Module Structure
+
+The Grants service has a **unique OperationGuard design**: it does NOT register OperationGuard as `APP_GUARD`. Instead, it applies `@UseGuards(OperationGuard)` on each resolver. This is because `APP_GUARD` with `Scope.REQUEST` breaks RPC handlers (DI cannot resolve request-scoped `PermissionsCacheService` in an RPC context).
+
+```
+GrantsModule
+├── TenantDatabaseModule.forService('grants')
+├── ConfigModule (global)
+├── ThrottlerModule (60/60s)
+├── MicroservicesOrchestratorModule
+├── KeycloakM2MModule
+├── ClientsModule: GATEWAY_SERVICE
+└── GraphQLModule (ApolloFederationDriver)
+
+Controllers: GrantsController, GrantsBulkController
+Resolvers: GrantsResolver, OperationPermissionResolver, PagePermissionResolver, IntrospectionResolver
+Services: GrantsService, SubgraphIntrospectionService, PermissionsCacheService (local)
+```
+
+### Local PermissionsCacheService
+
+Grants has its own `PermissionsCacheService` (not from `@cucu/service-common`) that is aliased:
+
+```typescript
+{ provide: SCPermissionsCacheService, useExisting: PermissionsCacheService }
+```
+
+This ensures DI works seamlessly for shared interceptors/decorators.
+
+## Schemas
 
 ### Group
 
-A collection of permissions assigned to users:
-
 ```typescript
-interface Group {
-  _id: ID;
-  name: string;           // e.g., "ADMIN", "MANAGER", "VIEWER"
-  description?: string;
+@Directive('@key(fields: "_id")')
+@Schema({ timestamps: true })
+class Group {
+  _id: string
+  name: string               // required, unique
+  description?: string
+  tenantId?: string
+  deletedAt?: Date           // soft delete
+  createdAt?: Date
+  updatedAt?: Date
 }
+// Index: { name: 1, deletedAt: 1 }
 ```
 
 ### Permission (Field-Level)
 
-Controls visibility and editability of specific fields:
-
 ```typescript
-interface Permission {
-  _id: ID;
-  groupId: ID;
-  entityName: string;     // e.g., "User", "Project"
-  fieldPath: string;      // e.g., "authData.email", "employmentData.RAL"
-  canView: boolean;
-  canEdit: boolean;
-  scope?: 'self' | 'all'; // 'self' = own records only
+@Directive('@key(fields: "_id")')
+@Schema({ timestamps: true })
+class Permission {
+  _id: string
+  groupId: string            // → Group._id
+  entityName: string         // "User", "Project", "Milestone", etc.
+  fieldPath: string          // "authData.email", "personalData.dateOfBirth", etc.
+  canView: boolean
+  canEdit: boolean
+  viewScope: FieldScope[]    // ['self'] | ['all'] | ['self','all']
+  editScope: FieldScope[]
+  tenantId?: string
 }
+// Unique index: { groupId, entityName, fieldPath }
 ```
+
+**FieldScope enum**: `SELF` (own records only) | `ALL` (all records)
 
 ### OperationPermission
 
-Controls ability to execute GraphQL operations:
-
 ```typescript
-interface OperationPermission {
-  _id: ID;
-  groupId: ID;
-  operationName: string;  // e.g., "createUser", "findAllUsers"
-  canExecute: boolean;
-  scope?: 'self' | 'all'; // Optional scope restriction
+@Directive('@key(fields: "_id")')
+@Schema({ timestamps: true })
+class OperationPermission {
+  _id: string
+  groupId: string            // → Group._id
+  operationName: string      // "findAllUsers", "createProject", etc.
+  canExecute: boolean
+  operationScope: OperationScope  // 'self' | 'all'
+  tenantId?: string
 }
+// Unique index: { groupId, operationName }
 ```
 
 ### PagePermission
 
-Controls frontend page access:
-
 ```typescript
-interface PagePermission {
-  _id: ID;
-  groupId: ID;
-  pageName: string;       // e.g., "/admin/users", "/settings"
-  canAccess: boolean;
+@Directive('@key(fields: "_id")')
+@Schema({ timestamps: true })
+class PagePermission {
+  _id: string
+  groupId: string
+  pageKey: string            // "people", "settings.seniorityLevels", "gantt"
+  canAccess: boolean
+  tenantId?: string
 }
+// Unique index: { groupId, pageKey }
 ```
 
-## API Reference
+## GraphQL Schema
 
-### Group Operations
+### Group Queries & Mutations
 
-#### Queries
+| Operation | Type | Args | Return |
+|-----------|------|------|--------|
+| `findAllGroups` | Query | — | `[Group]!` |
+| `findOneGroup` | Query | `groupId: ID!` | `Group!` |
+| `createGroup` | Mutation | `input: CreateGroupInput!` | `Group!` |
+| `updateGroup` | Mutation | `updateGroupInput: UpdateGroupInput!` | `Group!` |
+| `removeGroup` | Mutation | `input: DeleteGroupInput!` | `DeleteGroupOutput!` |
 
-```graphql
-# List all groups
-query {
-  findAllGroups {
-    _id
-    name
-    description
-  }
-}
+### Permission Queries & Mutations
 
-# Find specific group
-query FindOneGroup($groupId: ID!) {
-  findOneGroup(groupId: $groupId) {
-    _id
-    name
-    description
-  }
-}
-```
+| Operation | Type | Args | Return |
+|-----------|------|------|--------|
+| `findAllPermissions` | Query | — | `[Permission]!` |
+| `findPermissionsByGroup` | Query | `groupId: ID!` | `[Permission]!` |
+| `createPermission` | Mutation | `input: CreatePermissionInput!` | `Permission!` |
+| `updatePermission` | Mutation | `updatePermissionInput: UpdatePermissionInput!` | `Permission!` |
+| `removePermission` | Mutation | `input: DeletePermissionInput!` | `DeletePermissionOutput!` |
+| `bulkUpdatePermissions` | Mutation | `groupId: ID!, inputs: [BulkPermissionUpdate]!` | `[Permission]!` |
 
-#### Mutations
+### OperationPermission Queries & Mutations
 
-```graphql
-# Create group
-mutation CreateGroup($input: CreateGroupInput!) {
-  createGroup(input: $input) {
-    _id
-    name
-    description
-  }
-}
+| Operation | Type | Args | Return |
+|-----------|------|------|--------|
+| `findAllOperationPermissions` | Query | — | `[OperationPermission]!` |
+| `findOperationPermissionsByGroup` | Query | `groupId: ID!` | `[OperationPermission]!` |
+| `createOperationPermission` | Mutation | `input` | `OperationPermission!` |
+| `updateOperationPermission` | Mutation | `input` | `OperationPermission!` |
+| `removeOperationPermission` | Mutation | `_id: ID!` | `OperationPermission!` |
+| `bulkUpdateOperationPermissions` | Mutation | `groupId: ID!, inputs` | `[OperationPermission]!` |
 
-# Variables
-{
-  "input": {
-    "name": "MANAGER",
-    "description": "Project managers with read/write access"
-  }
-}
+### PagePermission Queries & Mutations
 
-# Update group
-mutation UpdateGroup($input: UpdateGroupInput!) {
-  updateGroup(updateGroupInput: $input) {
-    _id
-    name
-    description
-  }
-}
+| Operation | Type | Args | Return |
+|-----------|------|------|--------|
+| `findAllPagePermissions` | Query | — | `[PagePermission]!` |
+| `findPagePermissionsByGroup` | Query | `groupId: ID!` | `[PagePermission]!` |
+| `createPagePermission` | Mutation | `input` | `PagePermission!` |
+| `upsertPagePermission` | Mutation | `input` | `PagePermission!` |
+| `updatePagePermission` | Mutation | `input` | `PagePermission!` |
+| `removePagePermission` | Mutation | `_id: ID!` | `PagePermission!` |
 
-# Delete group
-mutation RemoveGroup($input: DeleteGroupInput!) {
-  removeGroup(input: $input) {
-    name
-    description
-  }
-}
-```
+### Special Queries
 
-### Permission Operations
-
-#### Queries
-
-```graphql
-# List all permissions
-query {
-  findAllPermissions {
-    _id
-    groupId
-    entityName
-    fieldPath
-    canView
-    canEdit
-  }
-}
-
-# Find permissions by group
-query FindPermissionsByGroup($groupId: ID!) {
-  findPermissionsByGroup(groupId: $groupId) {
-    _id
-    entityName
-    fieldPath
-    canView
-    canEdit
-  }
-}
-```
-
-#### Mutations
-
-```graphql
-# Create field permission
-mutation CreatePermission($input: CreatePermissionInput!) {
-  createPermission(input: $input) {
-    _id
-    groupId
-    entityName
-    fieldPath
-    canView
-    canEdit
-  }
-}
-
-# Variables
-{
-  "input": {
-    "groupId": "group-123",
-    "entityName": "User",
-    "fieldPath": "employmentData.RAL",
-    "canView": true,
-    "canEdit": false
-  }
-}
-
-# Update permission
-mutation UpdatePermission($input: UpdatePermissionInput!) {
-  updatePermission(updatePermissionInput: $input) {
-    _id
-    canView
-    canEdit
-  }
-}
-
-# Delete permission
-mutation RemovePermission($input: DeletePermissionInput!) {
-  removePermission(input: $input) {
-    _id
-    fieldPath
-  }
-}
-```
-
-### Operation Permission Operations
-
-#### Queries
-
-```graphql
-# List all operation permissions
-query {
-  findAllOperationPermissions {
-    _id
-    groupId
-    operationName
-    canExecute
-  }
-}
-
-# Find by group
-query FindOpPermissionsByGroup($groupId: ID!) {
-  findOperationPermissionsByGroup(groupId: $groupId) {
-    _id
-    operationName
-    canExecute
-  }
-}
-```
-
-#### Mutations
-
-```graphql
-# Create operation permission
-mutation CreateOperationPermission($input: CreateOperationPermissionInput!) {
-  createOperationPermission(input: $input) {
-    _id
-    groupId
-    operationName
-    canExecute
-  }
-}
-
-# Variables
-{
-  "input": {
-    "groupId": "group-123",
-    "operationName": "createUser",
-    "canExecute": true
-  }
-}
-
-# Update
-mutation UpdateOperationPermission($input: UpdateOperationPermissionInput!) {
-  updateOperationPermission(input: $input) {
-    _id
-    canExecute
-  }
-}
-
-# Delete
-mutation RemoveOperationPermission($_id: ID!) {
-  removeOperationPermission(_id: $_id) {
-    _id
-    operationName
-  }
-}
-```
-
-### Introspection Queries
-
-```graphql
-# List all fields for an entity type
-query ListFields($typeName: String!) {
-  listFieldsFromGateway(typeName: $typeName)
-}
-# Returns: ["_id", "authData.name", "authData.email", ...]
-
-# List queries for a service
-query ListQueries($serviceName: String!) {
-  listQueryFromGateway(serviceName: $serviceName)
-}
-# Returns: ["findAllUsers", "findOneUser", ...]
-
-# List mutations for a service
-query ListMutations($serviceName: String!) {
-  listMutationsFromGateway(serviceName: $serviceName)
-}
-# Returns: ["createUser", "updateUser", "removeUser", ...]
-```
+| Query | Description |
+|-------|-------------|
+| `myPermissions` | Returns current user's effective permissions. Uses `@SkipOperationGuard()` — everyone can query their own permissions |
+| `listFieldsFromGateway(typeName)` | Introspect all nested fields of a GraphQL type |
+| `listQueryFromGateway(serviceName)` | List all queries for a service |
+| `listMutationsFromGateway(serviceName)` | List all mutations for a service |
 
 ## RPC Patterns
 
-### Message Patterns
+### MessagePattern Handlers
 
-| Pattern | Payload | Response |
-|---------|---------|----------|
-| `GROUP_EXISTS` | `groupId: string` | `boolean` |
-| `FIND_GROUP_BY_NAME` | `name: string` | `Group` or `null` |
-| `CREATE_GROUP` | `CreateGroupInput` | `Group` |
-| `CREATE_PERMISSION` | `CreatePermissionInput` | `Permission` |
-| `UPSERT_PERMISSION` | `CreatePermissionInput` | `Permission` |
-| `CREATE_OPERATION_PERMISSION` | `CreateOperationPermissionInput` | `OperationPermission` |
-| `UPSERT_OPERATION_PERMISSION` | `CreateOperationPermissionInput` | `OperationPermission` |
-| `UPSERT_PAGE_PERMISSION` | `CreatePagePermissionInput` | `PagePermission` |
-| `FIND_OP_PERMISSIONS_BY_GROUP` | `{ groupId }` | `OperationPermission[]` |
-| `FIND_PERMISSIONS_BY_GROUP` | `{ groupId, entityName? }` | `Permission[]` |
-| `FIND_BULK_PERMISSIONS_MULTI` | `{ groupIds }` | `BulkPermissionsDTO` |
-| `FIND_PAGE_PERMISSIONS_BY_GROUP` | `{ groupId }` | `PagePermission[]` |
+| Pattern | Guard | Input | Output |
+|---------|-------|-------|--------|
+| `GROUP_EXISTS` | — | `string \| {id}` | `boolean` |
+| `FIND_GROUP_BY_NAME` | — | `string \| {name}` | `Group \| null` |
+| `CREATE_GROUP` | `RpcInternalGuard` | `CreateGroupInput + _internalSecret` | `Group` |
+| `CREATE_PERMISSION` | `RpcInternalGuard` | `CreatePermissionInput + _internalSecret` | `Permission` |
+| `UPSERT_PERMISSION` | `RpcInternalGuard` | `CreatePermissionInput + _internalSecret` | `Permission` |
+| `CREATE_OPERATION_PERMISSION` | `RpcInternalGuard` | input + `_internalSecret` | `OperationPermission` |
+| `UPSERT_OPERATION_PERMISSION` | `RpcInternalGuard` | input + `_internalSecret` | `OperationPermission` |
+| `UPSERT_PAGE_PERMISSION` | `RpcInternalGuard` | input + `_internalSecret` | `PagePermission` |
+| `FIND_OP_PERMISSIONS_BY_GROUP` | — | `{groupId}` | `OperationPermission[]` |
+| `FIND_PERMISSIONS_BY_GROUP` | — | `{groupId, entityName?}` | `Permission[]` |
+| `FIND_PAGE_PERMISSIONS_BY_GROUP` | — | `{groupId}` | `PagePermission[]` |
+| `FIND_BULK_PERMISSIONS_MULTI` | — | `{groupIds, entityNames?, opNames?}` | `BulkPermsDTO` |
 
-### Bulk Permissions Response
+The `FIND_BULK_PERMISSIONS_MULTI` pattern is the most critical — it's called by `PermissionsCacheService` in every service to load permissions for the current request.
 
-```typescript
-interface BulkPermissionsDTO {
-  canExecuteOps: string[];           // Operation names
-  canViewByEntity: {
-    [entityName: string]: string[];  // Field paths
-  };
-  scopeByEntity: {
-    [entityName: string]: {
-      [fieldPath: string]: string[]; // Scopes: ['self'] or ['all'] or ['self', 'all']
-    };
-  };
-  operationScopeByOp: {
-    [operationName: string]: string; // 'self' or 'all'
-  };
-}
-```
-
-## Events Emitted
-
-### PERMISSIONS_CHANGED
-
-Emitted when any permission is created, updated, or deleted:
+### BulkPermsDTO Response
 
 ```typescript
-// When permissions change
-this.redisClient.emit('PERMISSIONS_CHANGED', {
-  groupIds: ['group-123']
-});
+{
+  canExecuteOps: string[],          // Operations the user can execute
+  canViewByEntity: {                // Viewable fields per entity
+    User: ["_id", "authData.name", "authData.email", ...],
+    Project: ["_id", "projectBasicData.name", ...],
+  },
+  scopeByEntity: {                  // Field scope per entity
+    User: { "personalData.dateOfBirth": "self", "authData.name": "all" }
+  },
+  operationScopeByOp: {            // Operation scope
+    findOneUser: "self",
+    findAllUsers: "all",
+  }
+}
 ```
 
-All services listen for this event to invalidate their permission cache.
+## Business Logic
 
-### GROUP_CREATED / GROUP_UPDATED / GROUP_DELETED
+### PERMISSIONS_CHANGED Event
 
-Emitted for group lifecycle events:
+After any mutation that changes permissions (create/update/delete on Permission, OperationPermission, or PagePermission), the Grants service emits `PERMISSIONS_CHANGED`:
 
 ```typescript
-this.redisClient.emit('GROUP_CREATED', {
-  groupId: group._id,
-  userIds: ['user-1', 'user-2']  // Initial members, if any
-});
+this.gatewayClient.emit('PERMISSIONS_CHANGED', { groupIds: [affectedGroupId] });
 ```
 
-## Permission System Design
+This triggers instant cache invalidation across all services.
 
-### Three Tiers
+### Upsert Logic
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Tier 1: OPERATION PERMISSIONS                              │
-│  Can the user execute this Query/Mutation?                  │
-│  Example: canExecute('createUser') → true/false             │
-├─────────────────────────────────────────────────────────────┤
-│  Tier 2: FIELD PERMISSIONS (with Scope)                     │
-│  Can the user view/edit this field?                         │
-│  Example: canView('User', 'employmentData.RAL') → true/false│
-│  Scope: 'self' (own record) or 'all' (any record)          │
-├─────────────────────────────────────────────────────────────┤
-│  Tier 3: PAGE PERMISSIONS                                   │
-│  Can the user access this frontend page?                    │
-│  Example: canAccess('/admin/users') → true/false           │
-└─────────────────────────────────────────────────────────────┘
-```
+Upsert operations (`UPSERT_PERMISSION`, `UPSERT_OPERATION_PERMISSION`, `UPSERT_PAGE_PERMISSION`) use `findOneAndUpdate` with `upsert: true` to create or update in a single atomic operation. This is used by the Bootstrap service to idempotently seed permissions.
 
-### Permission Union
+### SubgraphIntrospectionService
 
-When a user belongs to multiple groups, permissions are **unioned**:
+Queries the Gateway's GraphQL schema via introspection to discover all types, fields, queries, and mutations. Used to power the permission admin UI:
 
 ```typescript
-// User in groups: ["MANAGER", "VIEWER"]
-
-// MANAGER: canView('User', 'employmentData.RAL') = true
-// VIEWER:  canView('User', 'employmentData.RAL') = false
-
-// Result: canView = true (any group grants access)
+async listAllNestedFields(typeName: string): Promise<string[]>
+async listAllQueriesByServiceName(serviceName: string): Promise<string[]>
+async listAllMutationsByServiceName(serviceName: string): Promise<string[]>
 ```
-
-### Scope Merging
-
-```typescript
-// MANAGER: scope for 'employmentData.RAL' = 'all'
-// VIEWER:  scope for 'employmentData.RAL' = 'self'
-
-// Result: scope = 'all' (more permissive wins)
-```
-
-## Setting Up Permissions
-
-### Step 1: Create Groups
-
-```graphql
-mutation {
-  admin: createGroup(input: { name: "ADMIN", description: "Full access" }) { _id }
-  manager: createGroup(input: { name: "MANAGER", description: "Project managers" }) { _id }
-  viewer: createGroup(input: { name: "VIEWER", description: "Read-only" }) { _id }
-}
-```
-
-### Step 2: Discover Operations
-
-```graphql
-query {
-  queries: listQueryFromGateway(serviceName: "User")
-  mutations: listMutationsFromGateway(serviceName: "User")
-}
-# Returns lists of operation names
-```
-
-### Step 3: Grant Operation Permissions
-
-```graphql
-mutation {
-  # ADMIN can do everything
-  createOperationPermission(input: {
-    groupId: "admin-id"
-    operationName: "createUser"
-    canExecute: true
-  }) { _id }
-
-  # VIEWER can only read
-  createOperationPermission(input: {
-    groupId: "viewer-id"
-    operationName: "findAllUsers"
-    canExecute: true
-  }) { _id }
-}
-```
-
-### Step 4: Discover Fields
-
-```graphql
-query {
-  listFieldsFromGateway(typeName: "User")
-}
-# Returns: ["_id", "authData.name", "authData.email", "employmentData.RAL", ...]
-```
-
-### Step 5: Grant Field Permissions
-
-```graphql
-mutation {
-  # ADMIN can view all fields
-  createPermission(input: {
-    groupId: "admin-id"
-    entityName: "User"
-    fieldPath: "employmentData.RAL"
-    canView: true
-    canEdit: true
-  }) { _id }
-
-  # VIEWER can only see non-sensitive fields
-  createPermission(input: {
-    groupId: "viewer-id"
-    entityName: "User"
-    fieldPath: "authData.name"
-    canView: true
-    canEdit: false
-  }) { _id }
-}
-```
-
-### Step 6: Set Scopes (Optional)
-
-```graphql
-mutation {
-  # MANAGER can only see their own RAL
-  createPermission(input: {
-    groupId: "manager-id"
-    entityName: "User"
-    fieldPath: "employmentData.RAL"
-    canView: true
-    canEdit: false
-    scope: "self"
-  }) { _id }
-}
-```
-
-## Configuration
-
-### Environment Variables
-
-```ini
-# Service Config
-GRANTS_SERVICE_NAME=grants
-GRANTS_SERVICE_PORT=3010
-GRANTS_DB_HOST=grants-db
-GRANTS_DB_PORT=9010
-
-# MongoDB
-MONGODB_URI=mongodb://grants-db:27017/grants
-
-# No dependencies (core service)
-GRANTS_DEPENDENCIES=[]
-
-# Redis
-REDIS_SERVICE_HOST=redis
-REDIS_SERVICE_TLS_PORT=6380
-```
-
-## Protected RPC Operations
-
-Some RPC operations are protected with `RpcInternalGuard`:
-
-```typescript
-@UseGuards(RpcInternalGuard)
-@MessagePattern('CREATE_GROUP')
-async createGroup(@Payload() dto: CreateGroupInput) {
-  return this.groupsService.create(dto);
-}
-```
-
-Callers must include `_internalSecret` in the payload:
-
-```typescript
-await lastValueFrom(
-  this.grantsClient.send('CREATE_GROUP', {
-    name: 'SUPERADMIN',
-    description: 'Full system access',
-    _internalSecret: process.env.INTERNAL_HEADER_SECRET,
-  })
-);
-```
-
-## File Structure
-
-```
-apps/grants/
-├── src/
-│   ├── main.ts
-│   ├── grants.module.ts
-│   ├── controllers/
-│   │   └── grants.controller.ts     # RPC handlers
-│   ├── resolvers/
-│   │   ├── groups.resolver.ts
-│   │   ├── permissions.resolver.ts
-│   │   └── operation-permissions.resolver.ts
-│   ├── services/
-│   │   ├── groups.service.ts
-│   │   ├── permissions.service.ts
-│   │   └── operation-permissions.service.ts
-│   ├── schemas/
-│   │   ├── group.schema.ts
-│   │   ├── permission.schema.ts
-│   │   └── operation-permission.schema.ts
-│   └── introspection/
-│       └── introspection.service.ts  # Gateway introspection
-├── Dockerfile
-└── README.md
-```
-
-## Next Steps
-
-- [Permission System](/architecture/permissions) - How permissions are enforced
-- [Add New Permission Guide](/guides/add-new-permission) - Step-by-step guide
-- [Users Service](/services/users) - How permissions apply to users

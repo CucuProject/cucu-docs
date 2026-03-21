@@ -6,14 +6,17 @@
 
 ```mermaid
 graph TB
-    subgraph "tenant-db"
+    subgraph "tenant-db (DB concerns)"
         TCM["TenantConnectionManager"]
         TDM["TenantDatabaseModule"]
-        TC["TenantContext (ALS)"]
-        TI["TenantInterceptor"]
-        TAP["TenantAwareClientProxy"]
         WTI["withTenantId()"]
         Helper["getTenantDbName()"]
+    end
+
+    subgraph "service-common (infrastructure)"
+        SC_TC["TenantContext (ALS)"]
+        SC_TI["TenantInterceptor"]
+        SC_TAP["TenantAwareClientProxy"]
     end
 
     subgraph "MongoDB"
@@ -24,19 +27,16 @@ graph TB
         DB4["grants_globex"]
     end
 
-    subgraph "service-common"
-        SC_TC["TenantContext (ALS)"]
-        SC_TI["TenantInterceptor"]
-    end
-
     TDM --> TCM
     TCM --> BaseConn
     BaseConn -->|useDb()| DB1
     BaseConn -->|useDb()| DB2
     BaseConn -->|useDb()| DB3
     BaseConn -->|useDb()| DB4
-    TCM --> TC
-    TC -.->|same pattern as| SC_TC
+    TCM --> SC_TC
+    TDM -.->|re-exports| SC_TC
+    TDM -.->|re-exports| SC_TI
+    TDM -.->|re-exports| SC_TAP
 
     style TCM fill:#e1f5fe
     style TDM fill:#fff3e0
@@ -45,11 +45,14 @@ graph TB
 
 ## Relationship with service-common
 
-`@cucu/tenant-db` has its **own copies** of `TenantContext`, `TenantInterceptor`, and `TenantAwareClientProxy`. These are functionally identical to the ones in `@cucu/service-common` — the duplication exists because `tenant-db` was originally a standalone library.
+`@cucu/tenant-db` **re-exports** `TenantContext`, `TenantInterceptor`, and `TenantAwareClientProxy` from `@cucu/service-common` for backward compatibility. These were moved to `service-common` because they are infrastructure concerns, not DB concerns.
 
-**In practice:** Services use `service-common`'s `TenantContext` and `TenantInterceptor` (registered by `createSubgraphMicroservice`), and `tenant-db`'s `TenantConnectionManager` reads from the same AsyncLocalStorage pattern. Since both libraries use Node.js `AsyncLocalStorage` with the same usage pattern, they share the async context when imported into the same service.
+**Current architecture:**
+- `TenantContext`, `TenantInterceptor`, `TenantAwareClientProxy` are defined in `@cucu/service-common`
+- `@cucu/tenant-db` re-exports them so existing imports continue to work
+- `TenantConnectionManager` and `TenantDatabaseModule` remain in `@cucu/tenant-db` (database-specific)
 
-> **Important:** The `TenantDatabaseModule.forService()` registers its own `TenantInterceptor` via `APP_INTERCEPTOR` by default. Since `createSubgraphMicroservice` also registers a global `TenantInterceptor`, services should use `disableInterceptor: true` to avoid double registration:
+> **Important:** The `TenantDatabaseModule.forService()` can register `TenantInterceptor` via `APP_INTERCEPTOR`. Since `createSubgraphMicroservice` already registers a global `TenantInterceptor`, services should use `disableInterceptor: true` to avoid double registration:
 > ```typescript
 > TenantDatabaseModule.forService('users', { disableInterceptor: true })
 > ```
@@ -60,9 +63,9 @@ graph TB
 |--------|------|---------|
 | `TenantConnectionManager` | Injectable Service | Singleton connection pool manager |
 | `TenantDatabaseModule` | NestJS Dynamic Module | `forService()` registration |
-| `TenantContext` | Object (ALS) | AsyncLocalStorage tenant context |
-| `TenantInterceptor` | NestJS Interceptor | Extracts tenant, strips RPC fields |
-| `TenantAwareClientProxy` | Class | Auto-injects `_tenantSlug` in RPC |
+| `TenantContext` | Object (ALS) | Re-exported from `@cucu/service-common` |
+| `TenantInterceptor` | NestJS Interceptor | Re-exported from `@cucu/service-common` |
+| `TenantAwareClientProxy` | Class | Re-exported from `@cucu/service-common` |
 | `withTenantId` | Function | Mixin to add `tenantId` to documents |
 | `getTenantDbName` | Function | Computes DB name from service + slug |
 

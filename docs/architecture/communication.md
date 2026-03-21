@@ -92,12 +92,23 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 
 ### Auth Service
 
+**Orchestrator Patterns** (Gateway thin proxy → Auth):
+
+| Pattern | Type | Input | Output | Purpose |
+|---------|------|-------|--------|---------|
+| `VERIFY_FROM_TOKEN` | Message | `{accessToken}` | `{user, tenants, permissions, currentTenant}` | Validate JWT + session, load identity |
+| `GET_ME` | Message | `{accessToken}` | `{me, session, tenants}` | Load current user profile |
+| `REFRESH_FROM_TOKEN` | Message | `{refreshToken, ip, device...}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens |
+| `SWITCH_FROM_TOKEN` | Message | `{accessToken, targetTenantSlug}` | `{accessToken, refreshToken, tenant}` | Switch tenant context |
+
+**Session Patterns** (internal):
+
 | Pattern | Type | Input | Output | Purpose |
 |---------|------|-------|--------|---------|
 | `LOGIN` | Message | `{email, password, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Legacy login (deprecated) |
 | `CREATE_AUTHENTICATED_SESSION` | Message | `{userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Create session after platform DB verification |
 | `CHECK_SESSION` | Message | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session for every request |
-| `REFRESH_SESSION` | Message | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Token rotation |
+| `REFRESH_SESSION` | Message | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Token rotation (internal) |
 | `REVOKE_SESSION` | Message | `{sessionId, requestUserId, force}` | void | Revoke single session |
 | `SWITCH_SESSION_TENANT` | Message | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch |
 | `USER_DELETED` | Event | `{userId}` | — | Revoke all sessions for deleted user |
@@ -280,6 +291,8 @@ headers.set('x-gateway-signature', signature);
 ```
 
 Subgraphs verify this signature via `verifyGatewaySignature(headers)` before trusting any `x-user-*` or `x-tenant-*` headers. This prevents direct calls to subgraph HTTP endpoints from spoofing user identity.
+
+See [Security](/shared/security.md) for details on `verifyGatewaySignature` and `RpcInternalGuard`.
 
 ## Event-Driven Patterns
 

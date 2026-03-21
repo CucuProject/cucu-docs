@@ -151,9 +151,11 @@ handlePermissionsChanged(@Payload() data: { groupIds: string[] }) {
 The `PermissionsCacheService` resolves user groups from multiple sources (in order):
 
 1. **Explicit groups** passed by the resolver
-2. **`x-user-groups` header** (set by Gateway, verified via HMAC)
-3. **JWT `groups` claim** (decoded from Bearer token)
+2. **`x-user-groups` header** (set by Gateway, verified via HMAC using `verifyGatewaySignature`)
+3. **JWT `groups` claim** (decoded from Bearer token, verified via `verifyFederationJwt` for federation calls)
 4. **`INTERNAL_CALL`** (for internal federation calls without user context)
+
+See [Security](/shared/security.md) for details on header and JWT verification.
 
 ## Scope Enforcement
 

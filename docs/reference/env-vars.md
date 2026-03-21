@@ -59,7 +59,16 @@ INTERNAL_HEADER_SECRET=cucu-dev-hmac-change-me-in-production
 
 # JWT (must match between gateway and auth)
 JWT_SECRET=ProdSecretKey
+
+# Federation JWT Signing (RS256)
+# Required by Gateway for signing federation JWTs
+FEDERATION_PRIVATE_KEY_PATH=/certs/federation.key
+
+# Required by subgraphs for verifying federation JWTs
+FEDERATION_PUBLIC_KEY_PATH=/certs/federation.pub
 ```
+
+See [Security](/shared/security.md) for details on federation JWT signing.
 
 ## Gateway Service
 
@@ -313,11 +322,13 @@ INTERNAL_HEADER_SECRET=<secure-random-key>
 
 These must be set for the platform to function:
 
-- `INTERNAL_HEADER_SECRET`
-- `JWT_SECRET`
+- `INTERNAL_HEADER_SECRET` — fail-closed HMAC signing (RpcInternalGuard rejects if missing)
+- `JWT_SECRET` — must match between gateway and auth
 - `MONGODB_URI` (per service)
 - `REDIS_SERVICE_HOST`
 - `<SERVICE>_SERVICE_PORT`
+- `FEDERATION_PRIVATE_KEY_PATH` — required by Gateway for federation JWT signing
+- `FEDERATION_PUBLIC_KEY_PATH` — required by subgraphs for federation JWT verification
 
 ### Optional Variables
 

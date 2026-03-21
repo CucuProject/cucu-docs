@@ -205,7 +205,9 @@ graph LR
 | Database | MongoDB (per-tenant via Mongoose `useDb`) |
 | Transport | Redis with mTLS (microservice RPC + event bus + cache) |
 | Auth | Passport.js + JWT + bcryptjs |
-| Multi-tenancy | `@cucu/tenant-db` (AsyncLocalStorage + connection pooling) |
+| Security | `@cucu/security` (RS256 federation JWTs, HMAC signature verification) |
+| Shared Infra | `@cucu/service-common` (guards, interceptors, context, bootstrap) |
+| Multi-tenancy | `@cucu/tenant-db` (connection pooling) + `@cucu/service-common` (ALS context) |
 | Orchestration | `@cucu/microservices-orchestrator` (dependency checking at startup) |
 
 ## Next Steps
@@ -216,3 +218,4 @@ graph LR
 - [Authentication Flow](/architecture/auth-flow) — login, JWT, refresh, session lifecycle
 - [Permission System](/architecture/permissions) — three-tier permission enforcement
 - [Startup Orchestration](/architecture/startup) — service dependency checking
+- [Security](/shared/security) — federation JWT signing, header verification, RPC guards

@@ -17,12 +17,25 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 
 ## Auth Service
 
+### Orchestrator Patterns (Gateway → Auth)
+
+| Pattern | Type | Payload | Response |
+|---------|------|---------|----------|
+| `VERIFY_FROM_TOKEN` | Message | `{ accessToken }` | `{ user, tenants, permissions, currentTenant }` |
+| `GET_ME` | Message | `{ accessToken }` | `{ me, session, tenants }` |
+| `REFRESH_FROM_TOKEN` | Message | `{ refreshToken, ip, device... }` | `{ accessToken, refreshToken, expiresIn }` |
+| `SWITCH_FROM_TOKEN` | Message | `{ accessToken, targetTenantSlug }` | `{ accessToken, refreshToken, tenant }` |
+
+### Session Patterns (Internal)
+
 | Pattern | Type | Payload | Response |
 |---------|------|---------|----------|
 | `LOGIN` | Message | `{ email, password, ip, deviceName, browserName, deviceFingerprint }` | `{ accessToken, refreshToken, userId, sessionId, expiresIn }` |
+| `CREATE_AUTHENTICATED_SESSION` | Message | `{ userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint }` | `{ accessToken, refreshToken, userId, sessionId, expiresIn }` |
 | `CHECK_SESSION` | Message | `{ sessionId }` | `{ isValid, userId?, groupIds?, reason? }` |
 | `REFRESH_SESSION` | Message | `{ refreshToken }` | `{ accessToken, newRefreshToken, userId, sessionId, expiresIn }` |
 | `REVOKE_SESSION` | Message | `{ sessionId, requestUserId, force }` | `void` |
+| `SWITCH_SESSION_TENANT` | Message | `{ sessionId, userId, tenantSlug, tenantId, email }` | `{ accessToken, refreshToken }` |
 | `USER_DELETED` | Event | `{ userId }` | N/A |
 | `REVOKE_ALL_SESSIONS` | Event | `{ userId }` | N/A |
 

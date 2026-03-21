@@ -24,8 +24,7 @@ GrantsModule
 ├── ConfigModule (global)
 ├── ThrottlerModule (60/60s)
 ├── MicroservicesOrchestratorModule
-├── KeycloakM2MModule
-├── ClientsModule: GATEWAY_SERVICE
+├── TenantAwareClientsModule: GATEWAY_SERVICE
 └── GraphQLModule (ApolloFederationDriver)
 
 Controllers: GrantsController, GrantsBulkController

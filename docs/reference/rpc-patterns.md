@@ -21,10 +21,10 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 
 | Pattern | Type | Payload | Response |
 |---------|------|---------|----------|
-| `VERIFY_FROM_TOKEN` | Message | `{ accessToken }` | `{ user, tenants, permissions, currentTenant }` |
-| `GET_ME` | Message | `{ accessToken }` | `{ me, session, tenants }` |
-| `REFRESH_FROM_TOKEN` | Message | `{ refreshToken, ip, device... }` | `{ accessToken, refreshToken, expiresIn }` |
-| `SWITCH_FROM_TOKEN` | Message | `{ accessToken, targetTenantSlug }` | `{ accessToken, refreshToken, tenant }` |
+| `VERIFY_FROM_TOKEN` | Message | `{ refreshToken }` | `{ valid, userId, groups, isPlatformAdmin, memberships }` |
+| `GET_ME` | Message | `{ refreshToken }` | `{ authenticated, user, permissions }` |
+| `REFRESH_FROM_TOKEN` | Message | `{ refreshToken }` | `{ accessToken, refreshToken, expiresIn }` |
+| `SWITCH_FROM_TOKEN` | Message | `{ refreshToken, targetTenantSlug }` | `{ accessToken, refreshToken, userId, tenantSlug }` |
 
 ### Session Patterns (Internal)
 

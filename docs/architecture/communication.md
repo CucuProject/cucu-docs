@@ -96,10 +96,10 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 
 | Pattern | Type | Input | Output | Purpose |
 |---------|------|-------|--------|---------|
-| `VERIFY_FROM_TOKEN` | Message | `{accessToken}` | `{user, tenants, permissions, currentTenant}` | Validate JWT + session, load identity |
-| `GET_ME` | Message | `{accessToken}` | `{me, session, tenants}` | Load current user profile |
-| `REFRESH_FROM_TOKEN` | Message | `{refreshToken, ip, device...}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens |
-| `SWITCH_FROM_TOKEN` | Message | `{accessToken, targetTenantSlug}` | `{accessToken, refreshToken, tenant}` | Switch tenant context |
+| `VERIFY_FROM_TOKEN` | Message | `{refreshToken}` | `{valid, userId, groups, isPlatformAdmin, memberships}` | Validate refresh token + session, load identity memberships |
+| `GET_ME` | Message | `{refreshToken}` | `{authenticated, user, permissions}` | Load current user profile + permissions |
+| `REFRESH_FROM_TOKEN` | Message | `{refreshToken}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens |
+| `SWITCH_FROM_TOKEN` | Message | `{refreshToken, targetTenantSlug}` | `{accessToken, refreshToken, userId, tenantSlug}` | Switch tenant context |
 
 **Session Patterns** (internal):
 

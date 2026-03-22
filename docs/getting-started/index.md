@@ -34,7 +34,7 @@ Before you begin, ensure you have the following installed:
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Gateway (:3000)                              │
-│              Apollo Federation + GlobalAuthGuard                 │
+│           Apollo Federation + JWT Auth Middleware                │
 └────────────────────────────┬────────────────────────────────────┘
                              │ Redis mTLS RPC
         ┌────────────────────┼────────────────────┐

@@ -12,7 +12,7 @@ The Gateway is the **single entry point** for all client traffic. It runs Apollo
 | Module | `AppModule` |
 | Entry | `gateway/src/main.ts` |
 
-The Gateway does **not** use `createSubgraphMicroservice()` — it has a custom bootstrap. It connects to Redis only as a **client** (for `send()`/`emit()` to other services), never as a listener.
+The Gateway uses `createSubgraphMicroservice()` with custom options: `inheritAppConfig: false` (to prevent `GlobalAuthGuard` from applying to Redis RPC handlers) and a `beforeStart` hook that mounts the JWT auth middleware. It connects to Redis as both a client (for `send()`/`emit()`) and listener (for the microservice transport), but its `APP_GUARD`s are HTTP/GraphQL-only.
 
 ## Architecture
 
@@ -21,6 +21,7 @@ The Gateway does **not** use `createSubgraphMicroservice()` — it has a custom 
 ```
 AppModule
 ├── ConfigModule (global)
+├── TenantClsModule (nestjs-cls for tenant context)
 ├── MicroservicesOrchestratorModule
 ├── PassportModule (defaultStrategy: 'jwt')
 ├── ThrottlerModule (60 req/60s global)
@@ -29,14 +30,18 @@ AppModule
 └── GraphQLModule (ApolloGatewayDriver + IntrospectAndCompose)
 
 Controllers:
-├── AuthController (REST: thin proxy for Auth service orchestrator)
+├── AuthController (REST: thin proxy using TenantContextService for CLS tenant context)
 └── IntrospectionController
 
 Providers:
 ├── ApolloGatewayProvider
-├── JwtStrategy (Passport)
 ├── GlobalAuthGuard (APP_GUARD)
-└── ThrottlerGuard (APP_GUARD)
+├── ThrottlerGuard (APP_GUARD)
+└── TenantContextService (for auth controller CLS context)
+
+Express middleware (mounted in beforeStart):
+├── cookieParser
+└── createJwtAuthMiddleware (JWT decode + CHECK_SESSION via RPC)
 ```
 
 ### Thin Proxy Pattern
@@ -75,40 +80,44 @@ The Gateway registers clients for all services it needs to call via RPC:
 
 ## Authentication Flow
 
+### JWT Auth Middleware (Express Level)
+
+The primary authentication mechanism is an Express middleware (`createJwtAuthMiddleware`) mounted in the `beforeStart` hook. It runs **before** Apollo Gateway registers its `/graphql` route, ensuring session validation occurs for every request:
+
+1. Extract Bearer token from `Authorization` header
+2. Decode JWT (no signature verification — that's done by the auth service during session check)
+3. Reject locally expired tokens (avoid unnecessary RPC)
+4. Run `CHECK_SESSION` RPC inside a CLS context (with `tenantSlug` from the JWT)
+5. If session is valid: set `req.user = { sub, sessionId, groups, tenantSlug, tenantId }`
+6. If session is invalid or RPC fails: leave `req.user` unset (fail-open for availability)
+
+This approach was chosen because NestJS `@Injectable()` middlewares registered via `MiddlewareConsumer.forRoutes('*')` sometimes miss Apollo routes.
+
 ### GlobalAuthGuard
 
 Applied globally via `APP_GUARD`. Extends Passport's `AuthGuard('jwt')`:
 
 - Supports both HTTP and GraphQL contexts
 - Skips routes decorated with `@Public()` (via `IS_PUBLIC_KEY` reflector metadata)
-- On GraphQL, extracts request from `GqlExecutionContext.create(context).getContext().req`
-
-### JwtStrategy
-
-Passport strategy that validates every authenticated request:
-
-1. Extract Bearer token from `Authorization` header
-2. Verify JWT signature using `JWT_SECRET`
-3. Call `CHECK_SESSION` RPC to Auth service with `payload.sessionId`
-4. Return `{ sub: userId, sessionId, groups, tenantSlug, tenantId }` as `req.user`
+- On GraphQL, `req.user` is already populated by the JWT auth middleware
+- On REST, works as a secondary gate for non-`@Public()` endpoints
 
 ## Apollo Federation Configuration
 
 ### RemoteGraphQLDataSource
 
-The Gateway's `willSendRequest()` hook handles header propagation:
+The Gateway's `willSendRequest()` hook handles header propagation. It reads from `context.req.user`, which is set by the `createJwtAuthMiddleware` Express middleware (not by a NestJS guard):
 
-**Authenticated user requests** (has Bearer token):
-1. Decode JWT to extract `sessionId`
-2. `CHECK_SESSION` RPC → get `userId`, `groupIds`
-3. Strip `Authorization` header (no forwarding of user JWTs to subgraphs)
-4. Set `x-user-groups`, `x-user-id`, `Content-Type`
-5. Propagate tenant context (`x-tenant-slug`, `x-tenant-id`) from JWT payload
+**Authenticated user requests** (`context.req.user` exists):
+1. `req.user` already contains validated `sub`, `groups`, `tenantSlug`, `tenantId` (from JWT middleware)
+2. Strip `Authorization` header (no forwarding of user JWTs to subgraphs)
+3. Set `x-user-id`, `x-user-groups`, `x-user-email` (decoded from JWT), `Content-Type`
+4. Propagate tenant context (`x-tenant-slug`, `x-tenant-id`) from `req.user`
 
-**Federation/internal calls** (no Bearer token):
+**Federation/internal calls** (no `req.user`):
 1. Get self-signed federation JWT from `FederationTokenService` (RS256, 60s TTL)
 2. Set `Authorization: Bearer {federationToken}`, `x-internal-federation-call: 1`
-3. Propagate user context if the federation call was triggered by a user request
+3. Propagate user context if the federation call was triggered by a user request (Scenario D)
 4. Propagate tenant context from user JWT or request headers
 
 **All requests**:
@@ -136,14 +145,18 @@ Login, refresh, and logout use REST endpoints instead of GraphQL mutations becau
 2. **Simplicity** — auth flows are sequential, not graph-shaped
 3. **Standards** — CSRF protection patterns work better with REST
 
-### Why Gateway Doesn't Listen on Redis?
+### Why Gateway Uses `inheritAppConfig: false`?
 
-The Gateway only calls other services; no service calls the Gateway. It's a pure HTTP/GraphQL server and RPC client. This simplifies its architecture and avoids circular dependencies.
+The Gateway connects to Redis (via `createSubgraphMicroservice`) but overrides `inheritAppConfig: false`. This prevents `GlobalAuthGuard` and `ThrottlerGuard` (APP_GUARDs designed for HTTP/GraphQL) from applying to the Redis microservice transport. The `TenantClsInterceptor` still works because it's registered via `useGlobalInterceptors` (applies to all transports regardless).
 
 ### Why CHECK_SESSION on Every Request?
 
-Even though JWT tokens contain user claims, the Gateway validates sessions on every request via `CHECK_SESSION` RPC. This enables:
+Even though JWT tokens contain user claims, the Gateway validates sessions on every request via `CHECK_SESSION` RPC (called from the Express-level `createJwtAuthMiddleware`). This enables:
 - Instant session revocation (not waiting for JWT expiry)
 - Real-time group membership updates
 - Session idle timeout enforcement
 - `lastActivity` tracking for session keep-alive
+
+### Why Express Middleware Instead of NestJS Guard?
+
+Apollo Gateway registers its `/graphql` route at startup. NestJS `@Injectable()` middlewares registered via `MiddlewareConsumer.forRoutes('*')` sometimes miss Apollo routes because of registration timing. By mounting `createJwtAuthMiddleware` in the `beforeStart` hook (which runs before Apollo's route registration), we guarantee session validation occurs for all requests. The middleware also sets CLS tenant context for the CHECK_SESSION RPC call.

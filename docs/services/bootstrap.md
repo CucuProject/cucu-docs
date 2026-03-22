@@ -144,7 +144,7 @@ Root environment keys are defined in `constants/root-env-keys.ts` and used by al
 
 Bootstrap doesn't access databases directly — it calls services via Redis RPC. This ensures:
 1. All business logic runs (validation, events, permissions)
-2. Multi-tenant routing is handled by each service's `TenantInterceptor`
+2. Multi-tenant routing is handled by each service's `TenantClsInterceptor` (via CLS context)
 3. Indexes are created by the owning service, not by Bootstrap
 4. Event-driven side effects fire correctly (e.g., GroupAssignments sync on user creation)
 

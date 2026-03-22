@@ -8,8 +8,9 @@
 graph TB
     subgraph "service-common"
         Bootstrap["createSubgraphMicroservice()"]
-        TenantCtx["TenantContext (ALS)"]
-        TenantInt["TenantInterceptor"]
+        TenantClsModule["TenantClsModule (nestjs-cls)"]
+        TenantCtxSvc["TenantContextService"]
+        TenantClsInt["TenantClsInterceptor"]
         TenantProxy["TenantAwareClientProxy"]
         TenantModule["TenantAwareClientsModule"]
         PermCache["PermissionsCacheService"]
@@ -22,10 +23,11 @@ graph TB
         BaseCtx["BaseSubgraphContext"]
     end
 
-    Bootstrap --> TenantInt
+    Bootstrap --> TenantClsInt
     Bootstrap --> |uses| Orchestrator["@cucu/microservices-orchestrator"]
-    TenantInt --> TenantCtx
-    TenantProxy --> TenantCtx
+    TenantClsModule --> TenantCtxSvc
+    TenantClsInt --> |reads/writes| CLS["ClsService"]
+    TenantProxy --> CLS
     TenantModule --> TenantProxy
     OpGuard --> PermCache
     OpGuard --> BaseCtx
@@ -34,10 +36,10 @@ graph TB
     FieldView --> PermCache
     PermCache --> HMAC
     BaseCtx --> HMAC
-    BaseCtx --> TenantCtx
+    BaseCtx --> CLS
 
     style Bootstrap fill:#e1f5fe
-    style TenantCtx fill:#fff3e0
+    style TenantClsModule fill:#fff3e0
     style PermCache fill:#f3e5f5
     style HMAC fill:#fce4ec
 ```
@@ -48,11 +50,13 @@ graph TB
 |--------|------|---------|
 | `createSubgraphMicroservice` | Function | Shared bootstrap for all subgraph microservices |
 | `CreateSubgraphOptions` | Interface | Options for `createSubgraphMicroservice` |
-| `TenantContext` | Object (ALS) | AsyncLocalStorage-based tenant context |
-| `TenantInterceptor` | NestJS Interceptor | Extracts tenant slug, sets ALS, strips RPC metadata |
-| `TenantAwareClientProxy` | Class | Wraps `ClientProxy` to auto-inject `_tenantSlug` |
-| `TenantAwareClientsModule` | NestJS Module | Drop-in replacement for `ClientsModule.registerAsync()` |
-| `BaseSubgraphContext` | Class | Request-scoped context with user/tenant info extraction |
+| `TenantClsModule` | NestJS Module | Configures `nestjs-cls` for tenant context propagation (ClsMiddleware + ClsInterceptor) |
+| `TenantContextService` | Injectable Service | DI-friendly wrapper around `ClsService<TenantClsStore>` for tenant slug access |
+| `TenantClsInterceptor` | NestJS Interceptor | Extracts tenant slug from RPC payloads into CLS, strips transport fields |
+| `TenantClsStore` | Interface | Typed CLS store: `{ tenantSlug: string; tenantId?: string }` |
+| `TenantAwareClientProxy` | Class | Wraps `ClientProxy` to auto-inject `_tenantSlug` from CLS |
+| `TenantAwareClientsModule` | NestJS Module | Drop-in replacement for `ClientsModule.registerAsync()` with CLS-based tenant injection |
+| `BaseSubgraphContext` | Class | Request-scoped context with user/tenant info extraction (uses CLS for tenant slug) |
 | `ISubgraphContext` | Interface | Contract for subgraph context classes |
 | `PermissionsCacheService` | Service | Lazy-loaded, memoized permission cache per request |
 | `OperationGuard` | Guard | Validates operation-level permissions on GraphQL resolvers |
@@ -108,9 +112,9 @@ export interface CreateSubgraphOptions {
    - `{PREFIX}_REDIS_TLS_CLIENT_CERT` / `KEY` — per-service Redis TLS certs
    - `REDIS_SERVICE_HOST`, `REDIS_SERVICE_TLS_PORT`, `REDIS_TLS_CA_CERT` — shared Redis config
 6. **Checks dependencies** via `MicroservicesOrchestratorService.areDependenciesReady()` — blocks until all declared dependencies are ready in Redis
-7. **Connects Redis microservice transport** with `inheritAppConfig: true` — this is critical: it ensures `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules also apply to RPC handlers
-8. **Registers global `RpcInternalGuard`** — fail-closed guard that validates `_internalSecret` in RPC payloads (see [Security](/shared/security.md))
-9. **Registers global `TenantInterceptor`** — extracts tenant slug from HTTP headers / RPC payloads, sets `TenantContext` via AsyncLocalStorage, and strips tenant metadata from payloads before `ValidationPipe` sees them
+7. **Connects Redis microservice transport** with `inheritAppConfig: true` (default, overridable via `connectMicroserviceOptions`) — this ensures `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules also apply to RPC handlers
+8. **Registers global `RpcInternalGuard`** via `useGlobalGuards` — fail-closed guard that validates `_internalSecret` in RPC payloads (see [Security](/shared/security.md)). Applies to ALL transports regardless of `inheritAppConfig`.
+9. **Registers global `TenantClsInterceptor`** via `useGlobalInterceptors` — extracts tenant slug from RPC payloads into CLS context, strips tenant metadata from payloads before `ValidationPipe` sees them. For HTTP/GraphQL, the `ClsMiddleware` (from `TenantClsModule`) handles initial context setup. Applies to ALL transports regardless of `inheritAppConfig`.
 10. **Registers global `ValidationPipe`** with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true` — runs *after* interceptors strip tenant fields
 11. **Starts all microservices** (Redis transport)
 12. **Listens on HTTP port**
@@ -118,9 +122,9 @@ export interface CreateSubgraphOptions {
 
 #### Why `inheritAppConfig: true` matters
 
-Without this flag, RPC handlers would not receive the `TenantInterceptor`. Since tenant propagation happens via `_tenantSlug` injected into RPC payloads by `TenantAwareClientProxy`, the interceptor must run on the RPC transport to:
-- Extract and store the tenant slug in AsyncLocalStorage
-- Strip `_tenantSlug` / `_tenantId` from the payload before `ValidationPipe` rejects them (since `forbidNonWhitelisted: true`)
+This flag ensures that `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules also apply to RPC handlers. However, `TenantClsInterceptor` and `RpcInternalGuard` are registered via `useGlobalInterceptors`/`useGlobalGuards` (which apply to ALL transports regardless of this flag).
+
+The Gateway overrides with `inheritAppConfig: false` to prevent its HTTP-only guards (`GlobalAuthGuard`, `ThrottlerGuard`) from applying to Redis RPC handlers.
 
 #### Example usage (from a service `main.ts`):
 
@@ -138,57 +142,85 @@ bootstrap();
 
 ## Tenant System
 
-The tenant system enables multi-tenancy across all microservices. It has four components that work together:
+The tenant system enables multi-tenancy across all microservices using **nestjs-cls** for context propagation:
 
 ```mermaid
 sequenceDiagram
     participant GW as Gateway
-    participant HTTP as HTTP Handler
-    participant TI as TenantInterceptor
-    participant ALS as TenantContext (ALS)
+    participant ClsMw as ClsMiddleware
+    participant TCI as TenantClsInterceptor
+    participant CLS as CLS Context
     participant SVC as Service Logic
     participant TAP as TenantAwareClientProxy
     participant RPC as RPC Handler (other service)
 
-    GW->>HTTP: x-tenant-slug: acme
-    HTTP->>TI: intercept()
-    TI->>ALS: TenantContext.run('acme', ...)
-    ALS->>SVC: Handler executes in ALS context
+    GW->>ClsMw: x-tenant-slug: acme
+    ClsMw->>CLS: cls.set('tenantSlug', 'acme')
+    CLS->>TCI: intercept() — HTTP: verifies CLS has slug
+    TCI->>SVC: Handler executes in CLS context
     SVC->>TAP: client.send('FIND_USER', { email })
+    TAP->>TAP: cls.get('tenantSlug') → 'acme'
     TAP->>RPC: { email, _tenantSlug: 'acme' }
-    RPC->>TI: intercept() (RPC transport)
-    TI->>TI: strip _tenantSlug from payload
-    TI->>ALS: TenantContext.run('acme', ...)
-    ALS->>SVC: RPC handler executes with tenant context
+    RPC->>TCI: intercept() (RPC transport)
+    TCI->>TCI: strip _tenantSlug from payload
+    TCI->>CLS: cls.set('tenantSlug', 'acme')
+    CLS->>SVC: RPC handler executes with tenant context
 ```
 
-### `TenantContext`
+### `TenantClsModule`
 
-**File:** `src/tenant/tenant-context.ts`
+**File:** `src/tenant/tenant-cls.module.ts`
 
-A singleton object backed by Node.js `AsyncLocalStorage`. Allows any code — including singleton services that are NOT request-scoped — to access the current request's tenant slug.
+Global module that configures `nestjs-cls` for tenant context propagation:
+
+- **`ClsMiddleware`** (HTTP/GraphQL): Mounted automatically. The `setup` callback reads `x-tenant-slug` from the request header and stores it in CLS.
+- **`ClsInterceptor`** (RPC): Mounted automatically. Initializes a CLS context for Redis transport messages.
+
+Must be imported in the root module of every subgraph service.
+
+### `TenantContextService`
+
+**File:** `src/tenant/tenant-context-service.ts`
+
+Injectable wrapper around `ClsService<TenantClsStore>`. Provides a familiar API for services that need tenant context:
 
 ```typescript
-export const TenantContext = {
-  run<T>(tenantSlug: string, fn: () => T): T;       // Wraps execution in tenant context
-  getTenantSlug(): string;                           // Throws if no context
-  getTenantSlugOrNull(): string | null;              // Returns null outside context
-};
+@Injectable()
+export class TenantContextService {
+  getTenantSlug(): string;                    // Throws if no CLS context
+  getTenantSlugOrNull(): string | null;       // Returns null outside context
+  setTenantSlug(slug: string): void;          // Rarely needed in service code
+  run<T>(tenantSlug: string, fn: () => T): T; // For code outside request lifecycle
+}
 ```
 
-**Why it lives in service-common:** Every microservice needs tenant awareness. The DB routing layer (`@cucu/tenant-db`) reads from this context, but the context itself is transport-level infrastructure that belongs here.
+### `TenantClsStore`
 
-### `TenantInterceptor`
+**File:** `src/tenant/tenant-cls-store.ts`
 
-**File:** `src/tenant/tenant.interceptor.ts`
+Typed CLS store interface:
 
-Registered globally by `createSubgraphMicroservice()`. Handles all three transports:
+```typescript
+export interface TenantClsStore extends ClsStore {
+  tenantSlug: string;
+  tenantId?: string;
+}
+```
 
-| Transport | Tenant Source | Post-Processing |
-|-----------|--------------|-----------------|
-| HTTP | `x-tenant-slug` header | None |
-| GraphQL | `req.headers['x-tenant-slug']` | None |
-| RPC | `data._tenantSlug` in payload | **Strips** `_tenantSlug` and `_tenantId` from payload |
+**Why nestjs-cls:** Framework-integrated CLS eliminates the need for manual `AsyncLocalStorage.run()` calls. `ClsMiddleware` and `ClsInterceptor` handle context initialization for all transports automatically, while `ClsService` provides DI-friendly access.
+
+### `TenantClsInterceptor`
+
+**File:** `src/tenant/tenant-cls.interceptor.ts`
+
+Registered globally by `createSubgraphMicroservice()`. Works with `ClsService` instead of raw `AsyncLocalStorage`:
+
+| Transport | Behavior |
+|-----------|----------|
+| HTTP / GraphQL | Verifies CLS has `tenantSlug` (set by `ClsMiddleware`). Fallback: reads from `x-tenant-slug` header. |
+| RPC | Extracts `_tenantSlug` from payload → `cls.set('tenantSlug', slug)`. **Strips** `_tenantSlug` and `_tenantId` from payload. |
+
+Unlike the old `TenantInterceptor`, this does **NOT** call `TenantContext.run()` — the CLS context is already initialized by `ClsMiddleware` (HTTP) or `ClsInterceptor` (RPC) from `TenantClsModule`.
 
 **Payload unwrapping logic:** When `TenantAwareClientProxy` wraps a primitive value (string, number), it creates `{ _payload: value, _tenantSlug: 'acme' }`. The interceptor detects this pattern and unwraps it, restoring the original payload shape before the handler sees it.
 
@@ -196,21 +228,22 @@ Registered globally by `createSubgraphMicroservice()`. Handles all three transpo
 
 **File:** `src/tenant/tenant-aware-client.proxy.ts`
 
-Wraps a standard NestJS `ClientProxy` to automatically inject `_tenantSlug` into every `send()` and `emit()` call.
+Wraps a standard NestJS `ClientProxy` to automatically inject `_tenantSlug` (from CLS) into every `send()` and `emit()` call.
 
 ```typescript
 class TenantAwareClientProxy extends ClientProxy {
-  static wrap(client: ClientProxy): TenantAwareClientProxy;
+  static wrap(client: ClientProxy, cls?: ClsService<TenantClsStore>): TenantAwareClientProxy;
   send<TResult, TInput>(pattern: any, data: TInput): Observable<TResult>;
   emit<TResult, TInput>(pattern: any, data: TInput): Observable<TResult>;
 }
 ```
 
 **Enrichment rules:**
-1. If no tenant context is active → payload unchanged (platform-level calls)
-2. If payload already has `_tenantSlug` → don't overwrite
-3. If payload is an object → spread `_tenantSlug` into it
-4. If payload is a primitive → wrap: `{ _payload: data, _tenantSlug: slug }`
+1. Reads tenant slug via `this.cls?.get('tenantSlug')` (CLS context)
+2. If no tenant context is active → payload unchanged (platform-level calls)
+3. If payload already has `_tenantSlug` → don't overwrite
+4. If payload is an object → spread `_tenantSlug` into it
+5. If payload is a primitive → wrap: `{ _payload: data, _tenantSlug: slug }`
 
 ### `TenantAwareClientsModule`
 
@@ -221,8 +254,9 @@ A drop-in replacement for `ClientsModule.registerAsync()`. Services use the same
 **How it works internally:**
 1. Renames each client registration to `__RAW__USERS_SERVICE`
 2. Registers the raw clients via `ClientsModule.registerAsync()`
-3. Creates wrapper providers that inject `__RAW__USERS_SERVICE` and return `TenantAwareClientProxy.wrap(rawClient)`
-4. Exports the original token names pointing to the wrapped proxies
+3. Creates wrapper providers that inject both `__RAW__USERS_SERVICE` and `ClsService`
+4. Returns `TenantAwareClientProxy.wrap(rawClient, clsService)` — the proxy reads tenant slug from CLS
+5. Exports the original token names pointing to the wrapped proxies
 
 **Before (manual wrapping):**
 ```typescript
@@ -480,16 +514,18 @@ Every service implements this interface in its own context class (e.g., `AuthCon
 
 **File:** `src/context/base-subgraph-context.ts`
 
-Request-scoped base implementation that extracts information from HTTP headers and AsyncLocalStorage:
+Request-scoped base implementation that extracts information from HTTP headers and CLS context:
 
 | Method | Source | Notes |
 |--------|--------|-------|
-| `userGroups()` | `req.user.groups` | Set by JWT (validated by JwtStrategy) |
+| `userGroups()` | `req.user.groups` | Set by JWT middleware (gateway) |
 | `isInternalCall()` | `x-internal-federation-call` header | Only trusted if HMAC valid |
 | `hasUserContext()` | `x-user-groups` header presence | Only trusted if HMAC valid |
 | `currentUserId()` | `x-user-id` header | Only trusted if HMAC valid |
-| `tenantSlug()` | `x-tenant-slug` header → ALS fallback | HTTP header preferred, then ALS |
+| `tenantSlug()` | CLS context → `x-tenant-slug` header fallback | CLS preferred (set by `ClsMiddleware`/`TenantClsInterceptor`), then HTTP header |
 | `tenantId()` | `x-tenant-id` header | HTTP only (not propagated in RPC) |
+
+**Important:** `tenantSlug()` now prioritizes CLS context over HTTP headers. For RPC contexts, `_tenantSlug` is no longer available on the request object because `TenantClsInterceptor` strips it — the slug is preserved in CLS instead.
 
 **Header extraction handles two patterns:**
 - Direct HTTP: `req.headers`
@@ -553,7 +589,7 @@ Every backend microservice depends on `@cucu/service-common`. Here's how each se
 
 | Service | Key Imports | How Used |
 |---------|-------------|----------|
-| **gateway** | `createSubgraphMicroservice`, `verifyGatewaySignature`, `buildRedisTlsOptions` | Bootstrap, HMAC signature computation (other side), Redis transport |
+| **gateway** | `createSubgraphMicroservice`, `verifyGatewaySignature`, `buildRedisTlsOptions`, `TenantClsStore`, `TenantContextService` | Bootstrap, HMAC signature computation, Redis transport, CLS tenant context for auth RPC calls |
 | **auth** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `PermissionsCacheService` | Bootstrap, auth context, tenant-aware RPC to users/grants |
 | **users** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `OperationGuard`, `ScopeGuard`, `createViewFieldsInterceptor`, `ViewableFields`, `TenantAwareClientsModule`, `PaginationInput`, `SortInput` | Full permission enforcement with field-level filtering |
 | **grants** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `OperationGuard`, `PermissionsCacheService`, `RpcInternalGuard`, `buildProjection` | Permission management, internal RPC protection |
@@ -584,7 +620,7 @@ graph LR
     SC --> MO
     SC --> SEC
 
-    TD -.->|re-exports TenantContext| SC
+    TD -.->|reads CLS context from| SC
     FLG -.->|extends buildProjection concept| SC
 
     subgraph "Every BE Service"

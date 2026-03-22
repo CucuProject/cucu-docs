@@ -14,8 +14,8 @@ This document provides a high-level view of the Cucu platform architecture.
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           Gateway Service (:3000)                            │
 │  ┌─────────────────┐  ┌────────────────┐  ┌──────────────────────────────┐  │
-│  │ Apollo Gateway  │  │ GlobalAuthGuard│  │ REST Endpoints               │  │
-│  │ Federation v2   │  │ JwtStrategy    │  │ /auth/login, /auth/refresh   │  │
+│  │ Apollo Gateway  │  │ JWT Auth MW    │  │ REST Endpoints               │  │
+│  │ Federation v2   │  │ JWT Middleware  │  │ /auth/login, /auth/refresh   │  │
 │  └─────────────────┘  └────────────────┘  └──────────────────────────────┘  │
 └────────────────────────────────────┬────────────────────────────────────────┘
                                      │

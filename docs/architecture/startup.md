@@ -29,9 +29,9 @@ bootstrap();
 4. **Apply middleware** if provided
 5. **Get ConfigService** and **MicroservicesOrchestratorService**
 6. **Check dependencies** — `areDependenciesReady(serviceName, redisConfig)`
-7. **Connect Redis microservice** — `Transport.REDIS` with mTLS, `inheritAppConfig: true`
+7. **Connect Redis microservice** — `Transport.REDIS` with mTLS, `inheritAppConfig: true` (default, overridable)
 8. **Register global guards** — `RpcInternalGuard` (fail-closed, validates `_internalSecret`)
-9. **Register global interceptors** — `TenantInterceptor`
+9. **Register global interceptors** — `TenantClsInterceptor` (reads tenant from CLS for HTTP, extracts from RPC payload for Redis)
 10. **Register global pipes** — `ValidationPipe` (whitelist, forbidNonWhitelisted, transform)
 11. **Start microservices** — `app.startAllMicroservices()`
 12. **Listen HTTP** — `app.listen(port)` from `{PREFIX}_SERVICE_PORT`
@@ -39,7 +39,9 @@ bootstrap();
 
 ### `inheritAppConfig: true`
 
-This is critical — it ensures that `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules are also applied to the microservice transport (RPC handlers). Without it, `TenantInterceptor` wouldn't run on RPC messages.
+This is the default for subgraph services — it ensures that `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules are also applied to the microservice transport (RPC handlers). Without it, module-level interceptors wouldn't run on RPC messages.
+
+Note: The Gateway overrides this with `inheritAppConfig: false` because its `APP_GUARD`s (`GlobalAuthGuard`, `ThrottlerGuard`) are designed for HTTP/GraphQL only and should not apply to Redis RPC handlers. The `TenantClsInterceptor` still works because it's registered via `app.useGlobalInterceptors()`, which applies to all transports regardless of `inheritAppConfig`.
 
 ### Execution Order
 
@@ -50,7 +52,8 @@ flowchart TD
     C --> D[Apply middleware]
     D --> E[areDependenciesReady - blocking]
     E --> F[connectMicroservice - Redis + mTLS]
-    F --> G[useGlobalInterceptors - TenantInterceptor]
+    F --> G1[useGlobalGuards - RpcInternalGuard]
+    G1 --> G[useGlobalInterceptors - TenantClsInterceptor]
     G --> H[useGlobalPipes - ValidationPipe]
     H --> I[startAllMicroservices]
     I --> J[app.listen port]
@@ -211,27 +214,30 @@ flowchart TD
 
 ## Gateway Bootstrap
 
-The Gateway has a special startup because it doesn't use `createSubgraphMicroservice()`:
+The Gateway uses `createSubgraphMicroservice()` with custom options:
 
 ```typescript
 // gateway/src/main.ts
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.use(cookieParser());
-  app.enableCors({ origin, credentials: true });
-  
-  const orchestrator = app.get(MicroservicesOrchestratorService);
-  await orchestrator.areDependenciesReady('gateway', redisConfig);
-  
-  // No connectMicroservice — Gateway doesn't listen on Redis RPC
-  // It only acts as an RPC client (sends to Auth, Tenants, etc.)
-  
-  await app.listen(port);
-  orchestrator.notifyServiceReady('gateway', redisConfig);
-}
+createSubgraphMicroservice(AppModule, 'GATEWAY', {
+  beforeStart: async (app) => {
+    app.use(cookieParser());
+
+    // Get DI services for the JWT auth middleware
+    const authClient = app.get('AUTH_SERVICE') as ClientProxy;
+    const cls = app.get(ClsService) as ClsService<TenantClsStore>;
+
+    // JWT auth middleware with CHECK_SESSION — must run before Apollo Gateway
+    // processes the request so that willSendRequest sees a validated req.user
+    app.use(createJwtAuthMiddleware(authClient, cls));
+  },
+  // inheritAppConfig: false prevents APP_GUARDs (GlobalAuthGuard, ThrottlerGuard)
+  // from applying to Redis RPC handlers (they're designed for HTTP/GraphQL only).
+  connectMicroserviceOptions: { inheritAppConfig: false },
+  orchestratorOptions: { retry: 15, retryDelays: 6000 },
+});
 ```
 
-The Gateway is an RPC **client** only — it never handles `@MessagePattern` or `@EventPattern`. It connects to Redis solely for `send()` and `emit()` calls.
+The Gateway also strips all internal headers (`x-internal-federation-call`, `x-user-groups`, `x-user-id`, `x-gateway-signature`, `x-tenant-slug`, `x-tenant-id`) from incoming client requests via Express middleware — preventing header spoofing.
 
 ## Health Monitoring
 

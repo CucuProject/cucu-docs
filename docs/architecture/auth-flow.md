@@ -121,7 +121,39 @@ sequenceDiagram
 
 ## Session Validation (Every Request)
 
-The `JwtStrategy` validates every authenticated request:
+### GraphQL Requests — JWT Auth Middleware
+
+For GraphQL requests, the **JWT Auth Middleware** (`createJwtAuthMiddleware`) runs as an Express middleware before Apollo Gateway processes the request. Apollo Gateway bypasses NestJS guards, so `GlobalAuthGuard`/`JwtStrategy` don't intercept GraphQL requests.
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend
+    participant MW as JWT Auth Middleware
+    participant Auth as Auth Service
+    participant Apollo as Apollo Gateway
+
+    FE->>MW: POST /graphql (Bearer token)
+    MW->>MW: jwt.decode(token) — NOT verify
+    MW->>MW: Check token expiry locally
+    MW->>MW: Extract sessionId, tenantSlug
+
+    Note over MW: Run CHECK_SESSION inside CLS context<br/>with tenantSlug for tenant-aware routing
+
+    MW->>Auth: CHECK_SESSION {sessionId} (via TenantAwareClientProxy)
+    Auth->>Auth: Find session, check validity, update lastActivity
+    Auth-->>MW: {isValid: true, userId, groupIds}
+    
+    MW->>MW: Set req.user = {sub, sessionId, groups, tenantSlug, tenantId}
+    MW->>Apollo: Request with validated req.user
+```
+
+::: info
+The middleware uses `jwt.decode()` (not `jwt.verify()`) because cryptographic JWT verification is redundant — `CHECK_SESSION` validates the session server-side. If the session has been revoked, `CHECK_SESSION` returns `isValid: false` and `req.user` is not set.
+:::
+
+### REST Requests — JwtStrategy
+
+For REST endpoints (`/auth/logout`, `/auth/switch`, etc.), the standard NestJS `GlobalAuthGuard` + `JwtStrategy` pipeline handles authentication:
 
 ```mermaid
 sequenceDiagram
@@ -130,7 +162,7 @@ sequenceDiagram
     participant Jwt as JwtStrategy
     participant Auth as Auth Service
 
-    FE->>Guard: Request with Bearer token
+    FE->>Guard: REST request with Bearer token
     Guard->>Guard: Check @Public() — skip if true
     Guard->>Jwt: validate(payload)
     Jwt->>Auth: CHECK_SESSION {sessionId}

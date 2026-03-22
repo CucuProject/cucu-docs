@@ -100,7 +100,8 @@ sequenceDiagram
     GW->>GW: HMAC sign headers → x-gateway-signature
 
     GW->>SG: Forward query with signed headers
-    SG->>SG: TenantInterceptor → set ALS context
+    SG->>SG: ClsMiddleware → initialize CLS context with tenantSlug
+    SG->>SG: TenantClsInterceptor → verify/set tenant in CLS
     SG->>SG: OperationGuard → check canExecute
     SG->>SG: ViewFieldsInterceptor → load field permissions
     SG->>SG: Resolver executes with field filtering
@@ -193,7 +194,7 @@ graph LR
 | **Permission Cache** | 5-minute process-wide TTL with instant invalidation on `PERMISSIONS_CHANGED` events |
 | **Soft Deletes** | Users use `deletedAt` timestamp; hard delete available as separate operation |
 | **Session-Based Auth** | JWT access token (short-lived) + httpOnly refresh cookie (7d) + server-side session in MongoDB |
-| **Tenant Context Propagation** | HTTP: `x-tenant-slug` header. RPC: `_tenantSlug` field auto-injected by `TenantAwareClientProxy`, read by `TenantInterceptor`, stored in `AsyncLocalStorage` |
+| **Tenant Context Propagation** | HTTP: `x-tenant-slug` header read by `ClsMiddleware` (nestjs-cls) into CLS context. RPC: `_tenantSlug` field auto-injected by `TenantAwareClientProxy`, extracted by `TenantClsInterceptor`, stored in CLS context via `ClsService` |
 | **RPC Security** | Bootstrap-only mutations use `RpcInternalGuard` with `_internalSecret` in payload |
 
 ## Technology Stack
@@ -205,7 +206,7 @@ graph LR
 | Database | MongoDB (per-tenant via Mongoose `useDb`) |
 | Transport | Redis with mTLS (microservice RPC + event bus + cache) |
 | Auth | Passport.js + JWT + bcryptjs |
-| Multi-tenancy | `@cucu/tenant-db` (AsyncLocalStorage + connection pooling) |
+| Multi-tenancy | `@cucu/tenant-db` (connection pooling) + `@cucu/service-common` (CLS context via nestjs-cls) |
 | Orchestration | `@cucu/microservices-orchestrator` (dependency checking at startup) |
 
 ## Next Steps

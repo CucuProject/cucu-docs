@@ -29,16 +29,21 @@ bootstrap();
 4. **Apply middleware** if provided
 5. **Get ConfigService** and **MicroservicesOrchestratorService**
 6. **Check dependencies** — `areDependenciesReady(serviceName, redisConfig)`
-7. **Connect Redis microservice** — `Transport.REDIS` with mTLS, `inheritAppConfig: true`
-8. **Register global interceptors** — `TenantInterceptor`
-9. **Register global pipes** — `ValidationPipe` (whitelist, forbidNonWhitelisted, transform)
-10. **Start microservices** — `app.startAllMicroservices()`
-11. **Listen HTTP** — `app.listen(port)` from `{PREFIX}_SERVICE_PORT`
-12. **Notify ready** — `orchestratorService.notifyServiceReady(serviceName, redisConfig)`
+7. **Connect Redis microservice** — `Transport.REDIS` with mTLS, `inheritAppConfig: true` (overridable via `connectMicroserviceOptions`)
+8. **Register global guards** — `RpcInternalGuard` (validates `_internalSecret` in RPC payloads)
+9. **Register global interceptors** — `TenantClsInterceptor` (extracts tenant from headers/RPC, sets CLS context, strips metadata)
+10. **Register global pipes** — `ValidationPipe` (whitelist, forbidNonWhitelisted, transform)
+11. **Start microservices** — `app.startAllMicroservices()`
+12. **Listen HTTP** — `app.listen(port)` from `{PREFIX}_SERVICE_PORT`
+13. **Notify ready** — `orchestratorService.notifyServiceReady(serviceName, redisConfig)`
 
 ### `inheritAppConfig: true`
 
-This is critical — it ensures that `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules are also applied to the microservice transport (RPC handlers). Without it, `TenantInterceptor` wouldn't run on RPC messages.
+This is the default — it ensures that `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules are also applied to the microservice transport (RPC handlers). The Gateway overrides this with `{ inheritAppConfig: false }` because its `APP_GUARD` providers (`GlobalAuthGuard`, `ThrottlerGuard`) are HTTP-only.
+
+::: info
+`TenantClsInterceptor` and `RpcInternalGuard` are registered via `app.useGlobalInterceptors()` / `app.useGlobalGuards()` (not as `APP_INTERCEPTOR`/`APP_GUARD`), so they apply to ALL transports regardless of `inheritAppConfig`.
+:::
 
 ### Execution Order
 
@@ -49,7 +54,8 @@ flowchart TD
     C --> D[Apply middleware]
     D --> E[areDependenciesReady - blocking]
     E --> F[connectMicroservice - Redis + mTLS]
-    F --> G[useGlobalInterceptors - TenantInterceptor]
+    F --> F2[useGlobalGuards - RpcInternalGuard]
+    F2 --> G[useGlobalInterceptors - TenantClsInterceptor]
     G --> H[useGlobalPipes - ValidationPipe]
     H --> I[startAllMicroservices]
     I --> J[app.listen port]
@@ -210,27 +216,42 @@ flowchart TD
 
 ## Gateway Bootstrap
 
-The Gateway has a special startup because it doesn't use `createSubgraphMicroservice()`:
+The Gateway now uses `createSubgraphMicroservice()` with custom options:
 
 ```typescript
 // gateway/src/main.ts
-async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.use(cookieParser());
-  app.enableCors({ origin, credentials: true });
-  
-  const orchestrator = app.get(MicroservicesOrchestratorService);
-  await orchestrator.areDependenciesReady('gateway', redisConfig);
-  
-  // No connectMicroservice — Gateway doesn't listen on Redis RPC
-  // It only acts as an RPC client (sends to Auth, Tenants, etc.)
-  
-  await app.listen(port);
-  orchestrator.notifyServiceReady('gateway', redisConfig);
-}
+createSubgraphMicroservice(AppModule, 'GATEWAY', {
+  beforeStart: async (app) => {
+    app.use(cookieParser());
+    
+    // JWT auth middleware with CHECK_SESSION — must run before Apollo Gateway
+    const authClient = app.get('AUTH_SERVICE') as ClientProxy;
+    const cls = app.get(ClsService) as ClsService<TenantClsStore>;
+    app.use(createJwtAuthMiddleware(authClient, cls));
+  },
+  middleware: [
+    // Strip internal headers from external requests (prevent spoofing)
+    (req, res, next) => {
+      delete req.headers['x-internal-federation-call'];
+      delete req.headers['x-user-groups'];
+      delete req.headers['x-user-id'];
+      delete req.headers['x-gateway-signature'];
+      delete req.headers['x-tenant-slug'];
+      delete req.headers['x-tenant-id'];
+      next();
+    },
+  ],
+  // Gateway's APP_GUARDs (GlobalAuthGuard, ThrottlerGuard) are HTTP-only.
+  // inheritAppConfig: false prevents them from being applied to Redis RPC handlers.
+  connectMicroserviceOptions: { inheritAppConfig: false },
+  orchestratorOptions: { retry: 15, retryDelays: 6000 },
+});
 ```
 
-The Gateway is an RPC **client** only — it never handles `@MessagePattern` or `@EventPattern`. It connects to Redis solely for `send()` and `emit()` calls.
+Key differences from other services:
+- **JWT Auth Middleware** in `beforeStart`: Decodes JWT and validates session via `CHECK_SESSION` RPC before Apollo processes the request
+- **Header sanitization** in `middleware`: Strips internal headers to prevent external spoofing
+- **`inheritAppConfig: false`**: Prevents HTTP-only guards from applying to Redis transport
 
 ## Health Monitoring
 

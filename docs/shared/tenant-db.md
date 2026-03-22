@@ -45,14 +45,15 @@ graph TB
 
 ## Relationship with service-common
 
-`@cucu/tenant-db` has its **own copies** of `TenantContext`, `TenantInterceptor`, and `TenantAwareClientProxy`. These are functionally identical to the ones in `@cucu/service-common` — the duplication exists because `tenant-db` was originally a standalone library.
+`@cucu/tenant-db` **re-exports** `TenantClsStore`, `TenantClsModule`, `TenantContextService`, `TenantClsInterceptor`, and `TenantAwareClientProxy` from `@cucu/service-common` for convenience.
 
-**In practice:** Services use `service-common`'s `TenantContext` and `TenantInterceptor` (registered by `createSubgraphMicroservice`), and `tenant-db`'s `TenantConnectionManager` reads from the same AsyncLocalStorage pattern. Since both libraries use Node.js `AsyncLocalStorage` with the same usage pattern, they share the async context when imported into the same service.
+**Current architecture:**
+- All tenant context components (`TenantClsModule`, `TenantContextService`, `TenantClsInterceptor`, `TenantAwareClientProxy`) are defined in `@cucu/service-common`
+- `@cucu/tenant-db` re-exports them so they can be imported from either package
+- `TenantConnectionManager` and `TenantDatabaseModule` remain in `@cucu/tenant-db` (database-specific)
+- `TenantConnectionManager` reads tenant slug from `ClsService` (injected via DI)
 
-> **Important:** The `TenantDatabaseModule.forService()` registers its own `TenantInterceptor` via `APP_INTERCEPTOR` by default. Since `createSubgraphMicroservice` also registers a global `TenantInterceptor`, services should use `disableInterceptor: true` to avoid double registration:
-> ```typescript
-> TenantDatabaseModule.forService('users', { disableInterceptor: true })
-> ```
+> **Note:** `TenantDatabaseModule.forService()` no longer registers an interceptor. Tenant context setup is handled by `TenantClsModule` (imported in the root module) and `TenantClsInterceptor` (registered globally by `createSubgraphMicroservice`).
 
 ## Module Index
 
@@ -60,9 +61,11 @@ graph TB
 |--------|------|---------|
 | `TenantConnectionManager` | Injectable Service | Singleton connection pool manager |
 | `TenantDatabaseModule` | NestJS Dynamic Module | `forService()` registration |
-| `TenantContext` | Object (ALS) | AsyncLocalStorage tenant context |
-| `TenantInterceptor` | NestJS Interceptor | Extracts tenant, strips RPC fields |
-| `TenantAwareClientProxy` | Class | Auto-injects `_tenantSlug` in RPC |
+| `TenantClsStore` | Interface | Re-exported from `@cucu/service-common` |
+| `TenantClsModule` | NestJS Module | Re-exported from `@cucu/service-common` |
+| `TenantContextService` | Injectable Service | Re-exported from `@cucu/service-common` |
+| `TenantClsInterceptor` | NestJS Interceptor | Re-exported from `@cucu/service-common` |
+| `TenantAwareClientProxy` | Class | Re-exported from `@cucu/service-common` |
 | `withTenantId` | Function | Mixin to add `tenantId` to documents |
 | `getTenantDbName` | Function | Computes DB name from service + slug |
 
@@ -257,23 +260,38 @@ export class TenantDatabaseModule implements OnModuleInit {
     serviceName: string,
     options?: {
       mongoUri?: string;
-      disableInterceptor?: boolean;
     },
   ): DynamicModule;
 }
 ```
 
 **What `forService()` does:**
-1. Creates a `TenantConnectionManager` instance with the service name
-2. Optionally registers `TenantInterceptor` as `APP_INTERCEPTOR` (unless `disableInterceptor: true`)
-3. Marks the module as `global: true` so `TenantConnectionManager` is available everywhere
-4. On module init, calls `manager.init()` to establish the base connection
+1. Creates a `TenantConnectionManager` instance with the service name, injecting `ClsService` from DI
+2. Marks the module as `global: true` so `TenantConnectionManager` is available everywhere
+3. On module init, calls `manager.init()` to establish the base connection
+
+```typescript
+static forService(serviceName: string, options?: { mongoUri?: string }): DynamicModule {
+  return {
+    module: TenantDatabaseModule,
+    global: true,
+    providers: [{
+      provide: TenantConnectionManager,
+      useFactory: (cls: ClsService<TenantClsStore>) =>
+        new TenantConnectionManager(serviceName, cls, options?.mongoUri),
+      inject: [ClsService],
+    }],
+    exports: [TenantConnectionManager],
+  };
+}
+```
 
 **Usage in a service module:**
 ```typescript
 @Module({
   imports: [
-    TenantDatabaseModule.forService('users', { disableInterceptor: true }),
+    TenantClsModule,  // Must be imported — provides ClsService
+    TenantDatabaseModule.forService('users'),
     // ... other imports
   ],
 })

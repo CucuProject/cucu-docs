@@ -36,6 +36,7 @@ export default defineConfig({
           items: [
             { text: 'System Overview', link: '/architecture/overview' },
             { text: 'Apollo Federation', link: '/architecture/federation' },
+            { text: 'Multi-Tenant Architecture', link: '/architecture/multi-tenant' },
             { text: 'Service Communication', link: '/architecture/communication' },
             { text: 'Authentication Flow', link: '/architecture/auth-flow' },
             { text: 'Permission System', link: '/architecture/permissions' },
@@ -56,6 +57,9 @@ export default defineConfig({
             { text: 'Milestone to User', link: '/services/milestone-to-user' },
             { text: 'Milestone to Project', link: '/services/milestone-to-project' },
             { text: 'Project Access', link: '/services/project-access' },
+            { text: 'Organization', link: '/services/organization' },
+            { text: 'Holidays', link: '/services/holidays' },
+            { text: 'Tenants', link: '/services/tenants' },
             { text: 'Bootstrap', link: '/services/bootstrap' },
           ]
         },
@@ -64,8 +68,12 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: 'Service Common', link: '/shared/service-common' },
+            { text: 'Tenant DB', link: '/shared/tenant-db' },
+            { text: 'Security', link: '/shared/security' },
             { text: 'Field-Level Grants', link: '/shared/field-level-grants' },
             { text: 'Permission Rules', link: '/shared/permission-rules' },
+            { text: 'Project Utils', link: '/shared/project-utils' },
+            { text: 'Microservices Orchestrator', link: '/shared/microservices-orchestrator' },
           ]
         },
         {

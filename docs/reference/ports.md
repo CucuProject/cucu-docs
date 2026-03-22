@@ -17,6 +17,8 @@ This document lists all port assignments for services and databases in the Cucu 
 | **project-access** | 3008 | Project Access Control |
 | **grants** | 3010 | Permissions & Groups |
 | **organization** | 3012 | Lookup Tables |
+| **holidays** | 3013 | National Holidays, Company Closures, User Absences |
+| **tenants** | 3013 | Tenant Registry, User Identities (shares port with holidays) |
 | **bootstrap** | 3100 | Seed Data (one-time) |
 
 ## Database Ports

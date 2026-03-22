@@ -1,6 +1,6 @@
 # Apollo Federation 2
 
-Cucu uses **Apollo Federation 2** to compose a unified GraphQL schema from 12 subgraph services. The Gateway runs `IntrospectAndCompose` to dynamically discover and compose subgraph schemas.
+Cucu uses **Apollo Federation 2** to compose a unified GraphQL schema from 13 subgraph services. The Gateway runs `IntrospectAndCompose` to dynamically discover and compose subgraph schemas.
 
 ## Gateway Composition
 
@@ -265,12 +265,14 @@ Bearer token → CHECK_SESSION → extract userId + groupIds
 ### Internal Federation Calls
 
 ```
-No Bearer token → get M2M token from Keycloak
-→ Set: Authorization: Bearer {m2mToken}, x-internal-federation-call: 1
+No Bearer token → get self-signed JWT from FederationTokenService (RS256, 60s TTL)
+→ Set: Authorization: Bearer {federationToken}, x-internal-federation-call: 1
 → Propagate user context if triggered by user request (Scenario D)
 → Propagate tenant context from user JWT or request headers
-→ HMAC sign all headers → x-gateway-signature
+→ HMAC sign all headers with INTERNAL_HEADER_SECRET → x-gateway-signature
 ```
+
+See [Security](/shared/security.md) for details on `FederationTokenService` and `verifyFederationJwt`.
 
 ## Introspection Control
 

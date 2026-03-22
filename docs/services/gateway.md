@@ -1,6 +1,6 @@
 # Gateway Service
 
-The Gateway is the **single entry point** for all client traffic. It runs Apollo Federation 2 to compose a unified GraphQL schema from 11 subgraphs, handles REST authentication endpoints, validates JWT tokens, and forwards signed headers to subgraphs.
+The Gateway is the **single entry point** for all client traffic. It runs Apollo Federation 2 to compose a unified GraphQL schema from 13 subgraphs, acts as a **thin proxy** for authentication (delegating logic to the Auth service), validates JWT tokens, and forwards signed headers to subgraphs.
 
 ## Overview
 
@@ -24,12 +24,12 @@ AppModule
 ├── MicroservicesOrchestratorModule
 ├── PassportModule (defaultStrategy: 'jwt')
 ├── ThrottlerModule (60 req/60s global)
-├── KeycloakGatewayM2mModule (machine-to-machine tokens for federation)
-├── RedisClientsModule (9 service clients)
+├── FederationModule (provides FederationTokenService from @cucu/security)
+├── TenantAwareClientsModule (9 service clients)
 └── GraphQLModule (ApolloGatewayDriver + IntrospectAndCompose)
 
 Controllers:
-├── AuthController (REST: login, refresh, logout, verify, discover, switch)
+├── AuthController (REST: thin proxy for Auth service orchestrator)
 └── IntrospectionController
 
 Providers:
@@ -38,6 +38,19 @@ Providers:
 ├── GlobalAuthGuard (APP_GUARD)
 └── ThrottlerGuard (APP_GUARD)
 ```
+
+### Thin Proxy Pattern
+
+The Gateway implements a **thin proxy** pattern for authentication. Instead of containing auth logic, it:
+
+1. Receives auth requests (login, refresh, verify, etc.)
+2. Forwards them to Auth service via consolidated RPC patterns
+3. Returns the orchestrated response to the client
+
+This design:
+- **Centralizes auth logic** in the Auth service
+- **Simplifies Gateway** — no business logic, just routing
+- **Enables single-RPC flows** — e.g., `/auth/verify` calls `VERIFY_FROM_TOKEN` which returns user + tenants + permissions in one round-trip
 
 ### Redis Clients
 
@@ -93,14 +106,16 @@ The Gateway's `willSendRequest()` hook handles header propagation:
 5. Propagate tenant context (`x-tenant-slug`, `x-tenant-id`) from JWT payload
 
 **Federation/internal calls** (no Bearer token):
-1. Get M2M token from Keycloak
-2. Set `Authorization: Bearer {m2mToken}`, `x-internal-federation-call: 1`
+1. Get self-signed federation JWT from `FederationTokenService` (RS256, 60s TTL)
+2. Set `Authorization: Bearer {federationToken}`, `x-internal-federation-call: 1`
 3. Propagate user context if the federation call was triggered by a user request
 4. Propagate tenant context from user JWT or request headers
 
 **All requests**:
-1. Compute HMAC-SHA256 signature of all internal headers
+1. Compute HMAC-SHA256 signature of all internal headers using `INTERNAL_HEADER_SECRET`
 2. Set `x-gateway-signature` — subgraphs verify this before trusting any `x-*` headers
+
+See [Security](/shared/security.md) for details on `FederationTokenService` and signature verification.
 
 ### Introspection Control
 

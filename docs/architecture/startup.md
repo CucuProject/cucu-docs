@@ -30,11 +30,12 @@ bootstrap();
 5. **Get ConfigService** and **MicroservicesOrchestratorService**
 6. **Check dependencies** — `areDependenciesReady(serviceName, redisConfig)`
 7. **Connect Redis microservice** — `Transport.REDIS` with mTLS, `inheritAppConfig: true`
-8. **Register global interceptors** — `TenantInterceptor`
-9. **Register global pipes** — `ValidationPipe` (whitelist, forbidNonWhitelisted, transform)
-10. **Start microservices** — `app.startAllMicroservices()`
-11. **Listen HTTP** — `app.listen(port)` from `{PREFIX}_SERVICE_PORT`
-12. **Notify ready** — `orchestratorService.notifyServiceReady(serviceName, redisConfig)`
+8. **Register global guards** — `RpcInternalGuard` (fail-closed, validates `_internalSecret`)
+9. **Register global interceptors** — `TenantInterceptor`
+10. **Register global pipes** — `ValidationPipe` (whitelist, forbidNonWhitelisted, transform)
+11. **Start microservices** — `app.startAllMicroservices()`
+12. **Listen HTTP** — `app.listen(port)` from `{PREFIX}_SERVICE_PORT`
+13. **Notify ready** — `orchestratorService.notifyServiceReady(serviceName, redisConfig)`
 
 ### `inheritAppConfig: true`
 

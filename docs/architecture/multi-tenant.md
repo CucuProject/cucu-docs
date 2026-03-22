@@ -6,13 +6,15 @@ Cucu implements **physical database isolation** for multi-tenancy. Each tenant g
 
 | Component | Package | Purpose |
 |-----------|---------|---------|
-| `TenantContext` | `@cucu/tenant-db` | AsyncLocalStorage wrapper — stores `tenantSlug` for the current request |
-| `TenantInterceptor` | `@cucu/tenant-db` | NestJS interceptor — extracts tenant slug from headers/RPC, calls `TenantContext.run()` |
+| `TenantContext` | `@cucu/service-common` | AsyncLocalStorage wrapper — stores `tenantSlug` for the current request |
+| `TenantInterceptor` | `@cucu/service-common` | NestJS interceptor — extracts tenant slug from headers/RPC, calls `TenantContext.run()` |
 | `TenantConnectionManager` | `@cucu/tenant-db` | Singleton — manages per-tenant Mongoose connections via `useDb()` |
-| `TenantDatabaseModule` | `@cucu/tenant-db` | Dynamic NestJS module — registers manager + interceptor for a service |
-| `TenantAwareClientProxy` | `@cucu/service-common` | ClientProxy wrapper — auto-injects `_tenantSlug` into RPC payloads |
+| `TenantDatabaseModule` | `@cucu/tenant-db` | Dynamic NestJS module — registers manager for a service |
+| `TenantAwareClientProxy` | `@cucu/service-common` | ClientProxy wrapper — auto-injects `_tenantSlug` and `_internalSecret` into RPC payloads |
 | `TenantAwareClientsModule` | `@cucu/service-common` | Drop-in replacement for `ClientsModule.registerAsync()` with tenant injection |
 | `withTenantId()` | `@cucu/tenant-db` | Mixin — stamps `tenantId` on documents as defence-in-depth |
+
+Note: `TenantContext`, `TenantInterceptor`, and `TenantAwareClientProxy` were moved from `@cucu/tenant-db` to `@cucu/service-common` as they are infrastructure concerns, not DB concerns. The `@cucu/tenant-db` package re-exports them for backward compatibility.
 
 ## Tenant Context Flow
 
@@ -167,12 +169,28 @@ this.usersClient.send('FIND_USER_BY_EMAIL', { email });
 ```typescript
 private enrich(data: any): any {
   const slug = TenantContext.getTenantSlugOrNull();
-  if (!slug) return data;                          // no context → pass through
-  if (data?._tenantSlug) return data;              // already has slug → skip
-  if (typeof data === 'object') return { ...data, _tenantSlug: slug };
-  return { _payload: data, _tenantSlug: slug };    // primitive → wrap
+  const secret = process.env.INTERNAL_HEADER_SECRET;
+
+  // Build metadata to inject
+  const meta: Record<string, string> = {};
+  if (slug) meta._tenantSlug = slug;
+  if (secret) meta._internalSecret = secret;
+
+  if (!Object.keys(meta).length) return data;
+
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const result = { ...data };
+    for (const [key, val] of Object.entries(meta)) {
+      if (!(key in result)) result[key] = val;  // Don't overwrite if present
+    }
+    return result;
+  }
+
+  return { _payload: data, ...meta };  // primitive → wrap
 }
 ```
+
+The proxy also injects `_internalSecret` for RPC authentication (see [Security](/shared/security.md)).
 
 ### TenantAwareClientsModule
 
@@ -283,26 +301,28 @@ The Gateway extracts these from the JWT and sets:
 - `x-tenant-id` header for the same
 - HMAC signature covering all internal headers
 
-## Tenant Switch Flow
+## Tenant Switch Flow (Orchestrator Pattern)
 
-Users with multiple tenant memberships can switch without re-login:
+Users with multiple tenant memberships can switch without re-login. The Gateway acts as a **thin proxy**, delegating the logic to the Auth orchestrator:
 
 ```mermaid
 sequenceDiagram
     participant FE as Frontend
-    participant GW as Gateway
+    participant GW as Gateway (thin proxy)
+    participant Auth as Auth Service (Orchestrator)
     participant TS as Tenants Service
-    participant Auth as Auth Service
 
     FE->>GW: POST /auth/switch {tenantSlug: "other-co"}
-    GW->>GW: Verify current auth (GlobalAuthGuard)
-    GW->>GW: Extract email from refresh token
-    GW->>TS: SWITCH_TENANT {email, tenantSlug}
+    GW->>Auth: SWITCH_FROM_TOKEN {accessToken, targetTenantSlug}
+
+    Note over Auth: AuthOrchestratorService.switchFromToken()
+
+    Auth->>Auth: Validate current JWT + session
+    Auth->>TS: SWITCH_TENANT {email, tenantSlug}
     TS->>TS: Verify membership exists
-    TS-->>GW: {userId, tenantSlug, tenantId}
-    GW->>Auth: SWITCH_SESSION_TENANT {sessionId, userId, tenantSlug, tenantId}
+    TS-->>Auth: {userId, tenantSlug, tenantId}
     Auth->>Auth: Re-issue JWT with new tenant context
-    Auth-->>GW: {accessToken, refreshToken}
+    Auth-->>GW: {accessToken, refreshToken, tenant}
     GW->>GW: Set new refresh cookie
     GW-->>FE: {accessToken, userId, tenantSlug}
 ```

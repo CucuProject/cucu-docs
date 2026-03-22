@@ -243,8 +243,7 @@ The seed process uses `bulkWrite` with upserts, making it idempotent — safe to
   imports: [
     TenantDatabaseModule.forService('holidays'),
     ConfigModule.forRoot({ isGlobal: true }),
-    RedisClientsModule,  // GRANTS_SERVICE, TENANTS_SERVICE
-    KeycloakM2MModule,
+    TenantAwareClientsModule,  // GRANTS_SERVICE, TENANTS_SERVICE
     MicroservicesOrchestratorModule,
     GraphQLModule.forRoot<ApolloFederationDriverConfig>({ ... }),
   ],

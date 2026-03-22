@@ -30,13 +30,12 @@ The Users service owns the **User** entity — the central domain object represe
 UsersModule
 ├── TenantDatabaseModule.forService('users')
 ├── ConfigModule (global)
-├── RedisClientsModule
+├── TenantAwareClientsModule
 │   ├── GRANTS_SERVICE
 │   ├── MILESTONE_TO_USER_SERVICE
 │   ├── GROUP_ASSIGNMENTS_SERVICE
 │   ├── AUTH_SERVICE
 │   └── ORGANIZATION_SERVICE
-├── KeycloakM2MModule
 ├── MicroservicesOrchestratorModule
 └── GraphQLModule (ApolloFederationDriver)
     └── orphanedTypes: [JobRole, SeniorityLevel, Company]

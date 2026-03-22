@@ -1,6 +1,6 @@
 # Auth Service
 
-The Auth service manages **server-side sessions**, **JWT token issuance**, and **refresh token rotation**. It stores sessions in a per-tenant MongoDB database and caches group IDs in Redis.
+The Auth service is the **authentication orchestrator** for the platform. It manages **server-side sessions**, **JWT token issuance**, **refresh token rotation**, and coordinates with Tenants and Grants services for identity resolution and permission loading. It stores sessions in a per-tenant MongoDB database and caches group IDs in Redis.
 
 ## Overview
 
@@ -26,11 +26,10 @@ The Auth service manages **server-side sessions**, **JWT token issuance**, and *
 AuthModule
 ├── TenantDatabaseModule.forService('auth')
 ├── ConfigModule (global)
-├── RedisClientsModule
+├── TenantAwareClientsModule
 │   ├── USERS_SERVICE
 │   ├── GRANTS_SERVICE
 │   └── TENANTS_SERVICE
-├── KeycloakM2MModule
 ├── MicroservicesOrchestratorModule
 ├── ThrottlerModule (5 req/15min per IP)
 ├── CacheModule (Redis-backed, DB=1, TTL=1h)
@@ -40,14 +39,51 @@ AuthModule
 Controller: AuthController (RPC handlers)
 Providers:
 ├── AuthContext (SUBGRAPH_CONTEXT)
+├── AuthOrchestratorService    ← NEW: Consolidates auth flows
 ├── AuthService
 ├── AuthResolver
+├── TokenService               ← Handles JWT signing/rotation
+├── SessionService             ← Session CRUD operations
+├── PasswordService            ← Password change flow
 ├── LocalSchemaFieldsService
 ├── PermissionsCacheService
 ├── AuthThrottlerGuard (APP_GUARD)
 ├── OperationGuard (APP_GUARD)
 └── ViewFieldsInterceptor (APP_INTERCEPTOR for Session)
 ```
+
+### Orchestrator Pattern
+
+The Auth service acts as the **central orchestrator** for authentication flows. The Gateway delegates all auth logic to Auth via consolidated RPC patterns:
+
+```
+Gateway (thin proxy)           Auth Service (orchestrator)
+    │                               │
+    │  VERIFY_FROM_TOKEN           │
+    │  ───────────────────────────►│
+    │                               ├─► Validate JWT
+    │                               ├─► CHECK_SESSION (internal)
+    │                               ├─► GET_IDENTITY_MEMBERSHIPS → Tenants
+    │                               └─► Return { user, tenants, permissions }
+    │                               │
+    │  GET_ME                      │
+    │  ───────────────────────────►│
+    │                               ├─► Validate session
+    │                               ├─► Load user data
+    │                               └─► Return { me, session }
+    │                               │
+    │  REFRESH_FROM_TOKEN          │
+    │  ───────────────────────────►│
+    │                               ├─► Validate refresh token
+    │                               ├─► Rotate tokens
+    │                               └─► Return { accessToken, refreshToken }
+```
+
+This pattern:
+- Keeps Gateway as a **thin proxy** with no auth logic
+- Centralizes all identity resolution in Auth service
+- Reduces RPC round-trips (Auth calls Tenants/Grants internally)
+- Simplifies Gateway code and testing
 
 ### Redis Cache
 
@@ -85,16 +121,27 @@ TTL: 3600 seconds (1 hour)
 
 ## RPC Patterns
 
-### MessagePattern (Request-Response)
+### Orchestrator Patterns (Gateway → Auth)
+
+These consolidated patterns are called by the Gateway's thin proxy endpoints:
+
+| Pattern | Input | Output | Description |
+|---------|-------|--------|-------------|
+| `VERIFY_FROM_TOKEN` | `{accessToken}` | `{user, tenants, permissions, currentTenant}` | Validate JWT + session, load identity memberships and permissions. Called by `/auth/verify` |
+| `GET_ME` | `{accessToken}` | `{me, session, tenants}` | Load current user profile and active session info. Called by `/auth/me` |
+| `REFRESH_FROM_TOKEN` | `{refreshToken, ip, device...}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens, return new pair. Called by `/auth/refresh` |
+| `SWITCH_FROM_TOKEN` | `{accessToken, targetTenantSlug}` | `{accessToken, refreshToken, tenant}` | Switch tenant context, re-issue tokens. Called by `/auth/switch` |
+
+### Session Patterns (Internal)
 
 | Pattern | Input | Output | Description |
 |---------|-------|--------|-------------|
 | `LOGIN` | `{email, password, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | **Deprecated** — legacy login via tenant DB |
 | `CREATE_AUTHENTICATED_SESSION` | `{userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Create/reuse session after platform DB verification |
-| `CHECK_SESSION` | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session (called on every request) |
-| `REFRESH_SESSION` | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Rotate tokens |
+| `CHECK_SESSION` | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session (called on every request by JwtStrategy) |
+| `REFRESH_SESSION` | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Rotate tokens (internal, called by orchestrator) |
 | `REVOKE_SESSION` | `{sessionId, requestUserId, force}` | void | Revoke single session |
-| `SWITCH_SESSION_TENANT` | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch |
+| `SWITCH_SESSION_TENANT` | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch (internal) |
 
 ### EventPattern (Fire-and-Forget)
 
@@ -107,11 +154,15 @@ TTL: 3600 seconds (1 hour)
 
 | Target | Pattern | Purpose |
 |--------|---------|---------|
+| **Tenants** | `CHECK_PLATFORM_ADMIN` | Check if user is platform admin (orchestrator) |
+| **Tenants** | `GET_IDENTITY_MEMBERSHIPS` | Load user's tenant memberships (orchestrator) |
+| **Tenants** | `SWITCH_TENANT` | Validate and execute tenant switch |
+| **Tenants** | `UPDATE_IDENTITY_PASSWORD` | Change password — sync to platform DB |
+| **Grants** | `GET_MY_PERMISSIONS` | Load permissions for current tenant context |
 | Users | `FIND_GROUPIDS_BY_USERID` | Load group IDs for JWT claims (cache miss) |
 | Users | `FIND_USER_BY_EMAIL` | Legacy login — find user with password |
 | Users | `FIND_USER_WITH_PASSWORD` | Change password — get current hash |
 | Users | `UPDATE_USER_PASSWORD` | Change password — update tenant DB |
-| Tenants | `UPDATE_IDENTITY_PASSWORD` | Change password — sync to platform DB |
 
 ## Session Schema
 

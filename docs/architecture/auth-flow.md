@@ -9,8 +9,12 @@ Cucu uses a **Universal Auth** model: user credentials live in the platform data
 | `AuthController` (Gateway) | `gateway/src/auth/auth.controller.ts` | REST endpoints: login, refresh, logout, verify, discover, switch |
 | `GlobalAuthGuard` | `gateway/src/auth/global-auth.guard.ts` | JWT validation on all requests (skips `@Public()`) |
 | `JwtStrategy` | `gateway/src/auth/jwt.strategy.ts` | Passport strategy: validates JWT + CHECK_SESSION RPC |
-| `AuthService` | `auth/src/auth.service.ts` | Session CRUD, token generation, password verification |
-| `AuthController` (Auth) | `auth/src/auth.controller.ts` | RPC handlers: LOGIN, CHECK_SESSION, REFRESH_SESSION, etc. |
+| `AuthOrchestratorService` | `auth/src/auth-orchestrator.service.ts` | Consolidated auth flows: verify, me, refresh, switch |
+| `AuthService` | `auth/src/auth.service.ts` | Session CRUD, token generation |
+| `SessionService` | `auth/src/session.service.ts` | Session management (create, revoke, validate) |
+| `TokenService` | `auth/src/token.service.ts` | JWT generation, refresh token rotation, group ID caching |
+| `PasswordService` | `auth/src/password.service.ts` | Password verification and change |
+| `AuthController` (Auth) | `auth/src/auth.controller.ts` | RPC handlers: orchestrator patterns + session patterns |
 | `TenantsService` | `tenants/src/tenants.service.ts` | VERIFY_IDENTITY_PASSWORD, DISCOVER_TENANTS, SWITCH_TENANT |
 
 ## Login Flow (Current — Universal Auth)
@@ -91,29 +95,31 @@ sequenceDiagram
 - **Delivered**: httpOnly cookie (`cucu_rf` dev / `__Host-rf` prod)
 - **Rotation**: Every refresh generates a new refresh token (previous invalidated)
 
-## Refresh Flow
+## Refresh Flow (Orchestrator Pattern)
 
 ```mermaid
 sequenceDiagram
     participant FE as Frontend
     participant GW as Gateway /auth/refresh
-    participant Auth as Auth Service
+    participant Auth as Auth Service (Orchestrator)
 
     FE->>GW: POST /auth/refresh (cookie: cucu_rf=oldRefreshToken)
-    GW->>Auth: REFRESH_SESSION {refreshToken: oldRefreshToken}
-    
+    GW->>Auth: REFRESH_FROM_TOKEN {refreshToken, ip, device...}
+
+    Note over Auth: AuthOrchestratorService.refreshFromToken()
+
     Auth->>Auth: JWT.verify(refreshToken) → payload
     Auth->>Auth: Check payload.type === 'refresh'
     Auth->>Auth: Find session by sessionId
     Auth->>Auth: Verify session.refreshToken === oldRefreshToken
-    
+
     Note over Auth: Check idle timeout (SESSION_IDLE_TIMEOUT, default 4h)
     Note over Auth: Check max age (MAX_SESSION_AGE, default 24h)
-    
+
     Auth->>Auth: getGroupIds(userId) — reload from cache/RPC
-    Auth->>Auth: Generate new accessToken + refreshToken
+    Auth->>Auth: Generate new accessToken + refreshToken (TokenService)
     Auth->>Auth: Update session: refreshToken, lastActivity, expiresAt
-    
+
     Auth-->>GW: {accessToken, refreshToken, userId, sessionId, expiresIn}
     GW->>GW: Set new refreshToken cookie
     GW-->>FE: {accessToken, userId, sessionId, expiresIn}
@@ -203,18 +209,25 @@ const fingerprint = SHA256(rawString).substring(0, 32);
 
 This enables session reuse across page reloads without requiring client-side storage (beyond the refresh cookie).
 
-## Verify Endpoint
+## Verify Endpoint (Orchestrator Pattern)
 
 `GET /auth/verify` — read-only, `@Public()` — checks if the refresh cookie represents a valid session:
 
 ```
+Gateway (thin proxy):
 1. Read refresh token from cookie
-2. Verify JWT signature locally
-3. CHECK_SESSION RPC
-4. CHECK_PLATFORM_ADMIN RPC (is this email a platform admin?)
-5. GET_IDENTITY_MEMBERSHIPS RPC (list all tenant memberships)
-6. Return: { valid, userId, groups, isPlatformAdmin, memberships }
+2. VERIFY_FROM_TOKEN RPC → Auth service
+
+Auth Orchestrator:
+1. Verify JWT signature
+2. CHECK_SESSION (internal)
+3. CHECK_PLATFORM_ADMIN RPC → Tenants
+4. GET_IDENTITY_MEMBERSHIPS RPC → Tenants
+5. GET_MY_PERMISSIONS RPC → Grants (optional)
+6. Return: { user, tenants, permissions, currentTenant }
 ```
+
+The Gateway acts as a **thin proxy** — it doesn't perform any auth logic, just forwards to the Auth orchestrator. This pattern reduces round-trips and centralizes auth logic.
 
 Used by the Next.js middleware on every navigation to determine auth state.
 

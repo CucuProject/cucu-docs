@@ -64,7 +64,9 @@ graph TB
 | `CheckFieldView` | Decorator | Marks a resolver with entity/field metadata for `FieldViewInterceptor` |
 | `ViewableFields` | Param Decorator | Extracts viewable field set from `req.__fieldSec` |
 | `ScopeCapable` | Decorator | Marks a resolver as scope-aware for `ScopeGuard` |
-| `verifyGatewaySignature` | Function | HMAC-SHA256 verification of gateway headers |
+| `verifyGatewaySignature` | Function | HMAC-SHA256 verification of gateway headers (re-exported from @cucu/security) |
+| `verifyFederationJwt` | Function | RS256 federation JWT verification (re-exported from @cucu/security) |
+| `FederationTokenService` | Service | RS256 federation JWT signing (re-exported from @cucu/security) |
 | `buildProjection` | Function | Converts viewable field set to Mongoose projection |
 | `PaginationInput` | GraphQL InputType | Standardized pagination (page, limit) |
 | `SortInput` | GraphQL InputType | Standardized sorting (field, order) |
@@ -107,11 +109,12 @@ export interface CreateSubgraphOptions {
    - `REDIS_SERVICE_HOST`, `REDIS_SERVICE_TLS_PORT`, `REDIS_TLS_CA_CERT` — shared Redis config
 6. **Checks dependencies** via `MicroservicesOrchestratorService.areDependenciesReady()` — blocks until all declared dependencies are ready in Redis
 7. **Connects Redis microservice transport** with `inheritAppConfig: true` — this is critical: it ensures `APP_INTERCEPTOR`, `APP_GUARD`, and `APP_PIPE` registered in modules also apply to RPC handlers
-8. **Registers global `TenantInterceptor`** — extracts tenant slug from HTTP headers / RPC payloads, sets `TenantContext` via AsyncLocalStorage, and strips tenant metadata from payloads before `ValidationPipe` sees them
-9. **Registers global `ValidationPipe`** with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true` — runs *after* interceptors strip tenant fields
-10. **Starts all microservices** (Redis transport)
-11. **Listens on HTTP port**
-12. **Notifies orchestrator** via `notifyServiceReady()` — publishes readiness to Redis
+8. **Registers global `RpcInternalGuard`** — fail-closed guard that validates `_internalSecret` in RPC payloads (see [Security](/shared/security.md))
+9. **Registers global `TenantInterceptor`** — extracts tenant slug from HTTP headers / RPC payloads, sets `TenantContext` via AsyncLocalStorage, and strips tenant metadata from payloads before `ValidationPipe` sees them
+10. **Registers global `ValidationPipe`** with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true` — runs *after* interceptors strip tenant fields
+11. **Starts all microservices** (Redis transport)
+12. **Listens on HTTP port**
+13. **Notifies orchestrator** via `notifyServiceReady()` — publishes readiness to Redis
 
 #### Why `inheritAppConfig: true` matters
 
@@ -429,18 +432,26 @@ findUserById(@Args('id') id: string) { ... }
 
 ## Security
 
+Security verification functions are now provided by `@cucu/security` and re-exported from `service-common` for backward compatibility:
+
 ### `verifyGatewaySignature(headers)`
 
-**File:** `src/security/verify-gateway-signature.ts`
-
-Verifies that internal HTTP headers (`x-user-groups`, `x-internal-federation-call`, `x-user-id`, `x-tenant-slug`, `x-tenant-id`) were set by the gateway and not spoofed by a direct caller.
+Re-exported from `@cucu/security`. Verifies that internal HTTP headers (`x-user-groups`, `x-internal-federation-call`, `x-user-id`, `x-tenant-slug`, `x-tenant-id`) were set by the gateway and not spoofed by a direct caller.
 
 **Algorithm:**
 1. Gateway computes: `HMAC-SHA256(secret, "x-user-groups|x-internal-federation-call|x-user-id|x-tenant-slug|x-tenant-id")`
 2. Sends result as `x-gateway-signature` header
 3. Each service recomputes and compares using `crypto.timingSafeEqual()`
 
-**Secret:** `process.env.INTERNAL_HEADER_SECRET` (falls back to `'cucu-dev-secret'` for local dev).
+**Secret:** `process.env.INTERNAL_HEADER_SECRET` (fails closed if not set).
+
+### `verifyFederationJwt(token)`
+
+Re-exported from `@cucu/security`. Verifies RS256-signed federation JWTs issued by `FederationTokenService`. Used by `PermissionsCacheService` to validate internal federation calls.
+
+### `FederationTokenService`
+
+Re-exported from `@cucu/security`. Generates self-signed RS256 JWTs for federation calls. Used by the Gateway. See [Security](/shared/security.md) for full documentation.
 
 **Why this matters:** Without HMAC verification, any client could send `x-user-groups: SUPERADMIN` directly to a subgraph service (bypassing the gateway) and gain full access. The signature ensures only the gateway can set these headers.
 
@@ -473,7 +484,7 @@ Request-scoped base implementation that extracts information from HTTP headers a
 
 | Method | Source | Notes |
 |--------|--------|-------|
-| `userGroups()` | `req.user.groups` | Set by Keycloak/JWT |
+| `userGroups()` | `req.user.groups` | Set by JWT (validated by JwtStrategy) |
 | `isInternalCall()` | `x-internal-federation-call` header | Only trusted if HMAC valid |
 | `hasUserContext()` | `x-user-groups` header presence | Only trusted if HMAC valid |
 | `currentUserId()` | `x-user-id` header | Only trusted if HMAC valid |
@@ -564,15 +575,16 @@ Every backend microservice depends on `@cucu/service-common`. Here's how each se
 ```mermaid
 graph LR
     SC["@cucu/service-common"]
+    SEC["@cucu/security"]
     MO["@cucu/microservices-orchestrator"]
     TD["@cucu/tenant-db"]
     FLG["@cucu/field-level-grants"]
     PR["@cucu/permission-rules"]
-    KM["@cucu/keycloak-m2m"]
 
     SC --> MO
+    SC --> SEC
 
-    TD -.->|imports TenantContext pattern| SC
+    TD -.->|re-exports TenantContext| SC
     FLG -.->|extends buildProjection concept| SC
 
     subgraph "Every BE Service"
@@ -582,8 +594,7 @@ graph LR
     SVC --> SC
     SVC --> TD
     SVC --> FLG
-    SVC --> KM
     SVC --> MO
 ```
 
-> **Note:** `service-common` imports `@cucu/microservices-orchestrator` directly in the bootstrap function. All other libraries are peers — services import them independently.
+> **Note:** `service-common` imports `@cucu/microservices-orchestrator` for bootstrap and re-exports security functions from `@cucu/security`. All other libraries are peers — services import them independently.

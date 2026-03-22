@@ -14,8 +14,8 @@ graph TB
     end
 
     subgraph "service-common (infrastructure)"
-        SC_TC["TenantContext (ALS)"]
-        SC_TI["TenantInterceptor"]
+        SC_CLS["TenantClsModule (nestjs-cls)"]
+        SC_TCI["TenantClsInterceptor"]
         SC_TAP["TenantAwareClientProxy"]
     end
 
@@ -33,10 +33,10 @@ graph TB
     BaseConn -->|useDb()| DB2
     BaseConn -->|useDb()| DB3
     BaseConn -->|useDb()| DB4
-    TCM --> SC_TC
-    TDM -.->|re-exports| SC_TC
-    TDM -.->|re-exports| SC_TI
-    TDM -.->|re-exports| SC_TAP
+    TCM --> SC_CLS
+    TDM -.->|uses| SC_CLS
+    TDM -.->|uses| SC_TCI
+    TDM -.->|uses| SC_TAP
 
     style TCM fill:#e1f5fe
     style TDM fill:#fff3e0
@@ -45,14 +45,14 @@ graph TB
 
 ## Relationship with service-common
 
-`@cucu/tenant-db` **re-exports** `TenantContext`, `TenantInterceptor`, and `TenantAwareClientProxy` from `@cucu/service-common` for backward compatibility. These were moved to `service-common` because they are infrastructure concerns, not DB concerns.
+`@cucu/tenant-db` depends on `@cucu/service-common` for tenant context. `TenantConnectionManager` reads the current tenant slug from CLS via `ClsService<TenantClsStore>` (injected from `nestjs-cls`).
 
 **Current architecture:**
-- `TenantContext`, `TenantInterceptor`, `TenantAwareClientProxy` are defined in `@cucu/service-common`
-- `@cucu/tenant-db` re-exports them so existing imports continue to work
+- `TenantClsModule`, `TenantContextService`, `TenantClsInterceptor`, `TenantAwareClientProxy` are defined in `@cucu/service-common`
 - `TenantConnectionManager` and `TenantDatabaseModule` remain in `@cucu/tenant-db` (database-specific)
+- `TenantConnectionManager` receives `ClsService<TenantClsStore>` via DI
 
-> **Important:** The `TenantDatabaseModule.forService()` can register `TenantInterceptor` via `APP_INTERCEPTOR`. Since `createSubgraphMicroservice` already registers a global `TenantInterceptor`, services should use `disableInterceptor: true` to avoid double registration:
+> **Important:** Since `createSubgraphMicroservice` already registers a global `TenantClsInterceptor`, services should use `disableInterceptor: true` in `TenantDatabaseModule.forService()` to avoid double registration:
 > ```typescript
 > TenantDatabaseModule.forService('users', { disableInterceptor: true })
 > ```
@@ -61,11 +61,8 @@ graph TB
 
 | Export | Type | Purpose |
 |--------|------|---------|
-| `TenantConnectionManager` | Injectable Service | Singleton connection pool manager |
+| `TenantConnectionManager` | Injectable Service | Singleton connection pool manager (reads tenant slug from CLS) |
 | `TenantDatabaseModule` | NestJS Dynamic Module | `forService()` registration |
-| `TenantContext` | Object (ALS) | Re-exported from `@cucu/service-common` |
-| `TenantInterceptor` | NestJS Interceptor | Re-exported from `@cucu/service-common` |
-| `TenantAwareClientProxy` | Class | Re-exported from `@cucu/service-common` |
 | `withTenantId` | Function | Mixin to add `tenantId` to documents |
 | `getTenantDbName` | Function | Computes DB name from service + slug |
 
@@ -183,7 +180,7 @@ Returns a Mongoose connection for the given tenant. **Synchronous** once the bas
 
 #### `getCurrentConnection(): Connection`
 
-Shortcut that reads `tenantSlug` from `TenantContext` (AsyncLocalStorage) and calls `getConnection()`.
+Shortcut that reads `tenantSlug` from CLS context (via `ClsService<TenantClsStore>`) and calls `getConnection()`. **Throws** if no tenant slug is available in the CLS context.
 
 #### `getModel<T>(tenantSlug, modelName, schema): Model<T>`
 
@@ -191,7 +188,7 @@ Returns a Mongoose Model for the given tenant. Registers the schema on the conne
 
 #### `getCurrentModel<T>(modelName, schema): Model<T>`
 
-Shortcut combining `getCurrentConnection` + `getModel`. This is the most commonly used method in service code:
+Shortcut combining `getCurrentConnection` + `getModel`. Reads tenant slug from CLS context. This is the most commonly used method in service code:
 
 ```typescript
 // In a service method:
@@ -268,7 +265,7 @@ export class TenantDatabaseModule implements OnModuleInit {
 
 **What `forService()` does:**
 1. Creates a `TenantConnectionManager` instance with the service name
-2. Optionally registers `TenantInterceptor` as `APP_INTERCEPTOR` (unless `disableInterceptor: true`)
+2. Optionally registers `TenantClsInterceptor` as `APP_INTERCEPTOR` (unless `disableInterceptor: true`)
 3. Marks the module as `global: true` so `TenantConnectionManager` is available everywhere
 4. On module init, calls `manager.init()` to establish the base connection
 
@@ -338,7 +335,7 @@ graph LR
     TDB["@cucu/tenant-db"]
     SC["@cucu/service-common"]
 
-    TDB -.->|"same ALS pattern"| SC
+    TDB -.->|"reads CLS context"| SC
 
     subgraph "Data Services"
         Users["users"]

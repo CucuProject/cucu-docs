@@ -6,9 +6,9 @@ Cucu uses a **Universal Auth** model: user credentials live in the platform data
 
 | Component | Location | Role |
 |-----------|----------|------|
-| `AuthController` (Gateway) | `gateway/src/auth/auth.controller.ts` | REST endpoints: login, refresh, logout, verify, discover, switch |
-| `GlobalAuthGuard` | `gateway/src/auth/global-auth.guard.ts` | JWT validation on all requests (skips `@Public()`) |
-| `JwtStrategy` | `gateway/src/auth/jwt.strategy.ts` | Passport strategy: validates JWT + CHECK_SESSION RPC |
+| `AuthController` (Gateway) | `gateway/src/auth/auth.controller.ts` | REST endpoints: login, refresh, logout, verify, me, discover, switch. Uses `TenantContextService.run()` to set CLS tenant context before RPC calls. |
+| `createJwtAuthMiddleware` | `gateway/src/middleware/jwt-auth.middleware.ts` | Express middleware: decodes JWT, runs CHECK_SESSION via RPC (in CLS context), sets `req.user`. Mounted in `beforeStart` to run before Apollo. |
+| `GlobalAuthGuard` | `gateway/src/auth/global-auth.guard.ts` | Passport `AuthGuard('jwt')` for non-GraphQL routes (skips `@Public()`) |
 | `AuthOrchestratorService` | `auth/src/auth-orchestrator.service.ts` | Consolidated auth flows: verify, me, refresh, switch |
 | `AuthService` | `auth/src/auth.service.ts` | Session CRUD, token generation |
 | `SessionService` | `auth/src/session.service.ts` | Session management (create, revoke, validate) |
@@ -38,8 +38,9 @@ sequenceDiagram
     TS-->>GW: {accountId, userId, tenantSlug, tenantId, email}
     
     GW->>Auth: CREATE_AUTHENTICATED_SESSION {userId, email, tenantSlug, tenantId, ip, deviceName, browserName, fingerprint}
+    Note over GW: Gateway uses TenantContextService.run(tenantSlug, createSession)<br/>to set CLS context for RPC propagation
     
-    Note over Auth: TenantInterceptor → ALS context → auth_{tenant} DB
+    Note over Auth: TenantClsInterceptor → CLS context → auth_{tenant} DB
     
     Auth->>Auth: getGroupIds(userId) — cache or RPC to Users
     Auth->>DB: Find existing session (userId + ip + fingerprint)
@@ -127,28 +128,37 @@ sequenceDiagram
 
 ## Session Validation (Every Request)
 
-The `JwtStrategy` validates every authenticated request:
+Session validation happens at the **Express middleware level** via `createJwtAuthMiddleware`, mounted in the Gateway's `beforeStart` hook. This ensures it runs **before** Apollo Gateway processes the request, so `willSendRequest` sees a validated `req.user`.
 
 ```mermaid
 sequenceDiagram
     participant FE as Frontend
-    participant Guard as GlobalAuthGuard
-    participant Jwt as JwtStrategy
+    participant MW as jwtAuthMiddleware (Express)
     participant Auth as Auth Service
+    participant Apollo as Apollo Gateway
 
-    FE->>Guard: Request with Bearer token
-    Guard->>Guard: Check @Public() — skip if true
-    Guard->>Jwt: validate(payload)
-    Jwt->>Auth: CHECK_SESSION {sessionId}
+    FE->>MW: Request with Bearer token
+    MW->>MW: decode(token) — extract sessionId, tenantSlug
+    MW->>MW: Check token not expired locally
     
-    Auth->>Auth: Find session by _id
+    Note over MW: Run CHECK_SESSION inside CLS context<br/>(tenantSlug set via cls.run())
+    MW->>Auth: CHECK_SESSION {sessionId} (with _tenantSlug in RPC)
+    
+    Auth->>Auth: Find session by _id in tenant-scoped DB
     Auth->>Auth: Check: not revoked, not idle, not expired
     Auth->>Auth: Update lastActivity (keep-alive)
     Auth->>Auth: Load groupIds (cached 1h)
-    Auth-->>Jwt: {isValid: true, userId, groupIds}
+    Auth-->>MW: {isValid: true, userId, groupIds}
     
-    Jwt-->>Guard: req.user = {sub: userId, sessionId, groups, tenantSlug, tenantId}
+    MW->>MW: req.user = {sub: userId, sessionId, groups, tenantSlug, tenantId}
+    MW->>Apollo: next() — Apollo sees req.user in willSendRequest
 ```
+
+::: info Why Express middleware instead of NestJS JwtStrategy?
+Apollo Gateway registers its `/graphql` route before NestJS middleware registered via `MiddlewareConsumer.forRoutes('*')` can intercept it. By mounting the JWT middleware in the `beforeStart` hook (which runs before Apollo's route registration), we guarantee session validation occurs for every request. The middleware also sets tenant context in CLS for the CHECK_SESSION RPC call.
+:::
+
+The `GlobalAuthGuard` (Passport `AuthGuard('jwt')`) still runs on non-GraphQL routes (REST auth endpoints). For `@Public()` routes, it is skipped.
 
 ## Session Lifecycle
 
@@ -216,18 +226,19 @@ This enables session reuse across page reloads without requiring client-side sto
 ```
 Gateway (thin proxy):
 1. Read refresh token from cookie
-2. VERIFY_FROM_TOKEN RPC → Auth service
+2. Decode refresh token to extract tenantSlug
+3. TenantContextService.run(tenantSlug, () => VERIFY_FROM_TOKEN RPC)
+   ↑ Sets CLS tenant context so TenantAwareClientProxy propagates _tenantSlug
 
 Auth Orchestrator:
 1. Verify JWT signature
 2. CHECK_SESSION (internal)
 3. CHECK_PLATFORM_ADMIN RPC → Tenants
 4. GET_IDENTITY_MEMBERSHIPS RPC → Tenants
-5. GET_MY_PERMISSIONS RPC → Grants (optional)
-6. Return: { user, tenants, permissions, currentTenant }
+5. Return: { valid, userId, groups, isPlatformAdmin, memberships }
 ```
 
-The Gateway acts as a **thin proxy** — it doesn't perform any auth logic, just forwards to the Auth orchestrator. This pattern reduces round-trips and centralizes auth logic.
+The Gateway acts as a **thin proxy** — it doesn't perform any auth logic, just forwards to the Auth orchestrator. The `@Public()` routes (verify, me, refresh) decode the refresh token to extract `tenantSlug` and use `TenantContextService.run()` to set the CLS tenant context before the RPC call. This ensures `TenantAwareClientProxy` propagates `_tenantSlug` to the auth service, which needs it for tenant-scoped session DB access.
 
 Used by the Next.js middleware on every navigation to determine auth state.
 

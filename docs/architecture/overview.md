@@ -39,8 +39,7 @@ graph TB
 
     subgraph "Gateway Layer"
         GW[Gateway :3000]
-        GW --> |JWT Validation| JwtStrategy
-        GW --> |Session Check| AuthRPC[CHECK_SESSION RPC]
+        GW --> |JWT Decode + CHECK_SESSION| JwtMw[jwtAuthMiddleware]
         GW --> |HMAC Signing| SubgraphFwd[Subgraph Forwarding]
     end
 
@@ -85,22 +84,22 @@ graph TB
 sequenceDiagram
     participant C as Client
     participant GW as Gateway
-    participant JWT as JwtStrategy
+    participant JWT as jwtAuthMiddleware
     participant Auth as Auth Service
     participant SG as Subgraph
 
     C->>GW: POST /graphql (Bearer token)
-    GW->>JWT: Validate JWT signature
-    JWT->>Auth: CHECK_SESSION(sessionId)
-    Auth-->>JWT: {isValid, userId, groupIds}
-    JWT-->>GW: req.user = {sub, sessionId, groups}
+    GW->>GW: jwtAuthMiddleware: decode JWT
+    GW->>Auth: CHECK_SESSION(sessionId) via RPC (in CLS tenant context)
+    Auth-->>GW: {isValid, userId, groupIds}
+    GW->>GW: req.user = {sub, sessionId, groups, tenantSlug}
 
-    Note over GW: Apollo RemoteGraphQLDataSource
+    Note over GW: Apollo RemoteGraphQLDataSource.willSendRequest
     GW->>GW: Set x-user-groups, x-user-id, x-tenant-slug
     GW->>GW: HMAC sign headers → x-gateway-signature
 
     GW->>SG: Forward query with signed headers
-    SG->>SG: TenantInterceptor → set ALS context
+    SG->>SG: ClsMiddleware + TenantClsInterceptor → set CLS context
     SG->>SG: OperationGuard → check canExecute
     SG->>SG: ViewFieldsInterceptor → load field permissions
     SG->>SG: Resolver executes with field filtering
@@ -193,7 +192,7 @@ graph LR
 | **Permission Cache** | 5-minute process-wide TTL with instant invalidation on `PERMISSIONS_CHANGED` events |
 | **Soft Deletes** | Users use `deletedAt` timestamp; hard delete available as separate operation |
 | **Session-Based Auth** | JWT access token (short-lived) + httpOnly refresh cookie (7d) + server-side session in MongoDB |
-| **Tenant Context Propagation** | HTTP: `x-tenant-slug` header. RPC: `_tenantSlug` field auto-injected by `TenantAwareClientProxy`, read by `TenantInterceptor`, stored in `AsyncLocalStorage` |
+| **Tenant Context Propagation** | HTTP: `x-tenant-slug` header read by `ClsMiddleware` (from `nestjs-cls`). RPC: `_tenantSlug` field auto-injected by `TenantAwareClientProxy`, read by `TenantClsInterceptor`, stored in CLS context via `ClsService` |
 | **RPC Security** | Bootstrap-only mutations use `RpcInternalGuard` with `_internalSecret` in payload |
 
 ## Technology Stack
@@ -207,7 +206,7 @@ graph LR
 | Auth | Passport.js + JWT + bcryptjs |
 | Security | `@cucu/security` (RS256 federation JWTs, HMAC signature verification) |
 | Shared Infra | `@cucu/service-common` (guards, interceptors, context, bootstrap) |
-| Multi-tenancy | `@cucu/tenant-db` (connection pooling) + `@cucu/service-common` (ALS context) |
+| Multi-tenancy | `@cucu/tenant-db` (connection pooling) + `@cucu/service-common` (`nestjs-cls` context via `TenantClsModule`) |
 | Orchestration | `@cucu/microservices-orchestrator` (dependency checking at startup) |
 
 ## Next Steps

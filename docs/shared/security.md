@@ -193,7 +193,7 @@ sequenceDiagram
     participant SG as Subgraph
 
     Note over GW: Authenticated user request (has Bearer token)
-    GW->>GW: JwtStrategy validates user JWT
+    GW->>GW: jwtAuthMiddleware decodes JWT + CHECK_SESSION
     GW->>GW: CHECK_SESSION RPC → get userId, groupIds
     GW->>GW: Set x-user-groups, x-user-id, x-tenant-slug
     GW->>GW: HMAC sign headers → x-gateway-signature

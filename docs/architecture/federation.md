@@ -256,9 +256,9 @@ The Gateway's `RemoteGraphQLDataSource.willSendRequest()` handles two scenarios:
 ### Authenticated User Requests
 
 ```
-Bearer token → CHECK_SESSION → extract userId + groupIds
+req.user (set by jwtAuthMiddleware — already ran CHECK_SESSION)
 → Strip Authorization header
-→ Set: x-user-groups, x-user-id, x-tenant-slug, x-tenant-id
+→ Set: x-user-groups, x-user-id, x-user-email (decoded from JWT), x-tenant-slug, x-tenant-id
 → HMAC sign all headers → x-gateway-signature
 ```
 

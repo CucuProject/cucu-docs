@@ -127,10 +127,10 @@ These consolidated patterns are called by the Gateway's thin proxy endpoints:
 
 | Pattern | Input | Output | Description |
 |---------|-------|--------|-------------|
-| `VERIFY_FROM_TOKEN` | `{accessToken}` | `{user, tenants, permissions, currentTenant}` | Validate JWT + session, load identity memberships and permissions. Called by `/auth/verify` |
-| `GET_ME` | `{accessToken}` | `{me, session, tenants}` | Load current user profile and active session info. Called by `/auth/me` |
-| `REFRESH_FROM_TOKEN` | `{refreshToken, ip, device...}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens, return new pair. Called by `/auth/refresh` |
-| `SWITCH_FROM_TOKEN` | `{accessToken, targetTenantSlug}` | `{accessToken, refreshToken, tenant}` | Switch tenant context, re-issue tokens. Called by `/auth/switch` |
+| `VERIFY_FROM_TOKEN` | `{refreshToken}` | `{valid, userId, groups, isPlatformAdmin, memberships}` | Validate refresh token + session, load identity memberships. Called by `/auth/verify` (Gateway decodes refresh token for tenantSlug, uses `TenantContextService.run()` for CLS context) |
+| `GET_ME` | `{refreshToken}` | `{authenticated, user, permissions}` | Load current user profile, permissions. Called by `/auth/me` (same CLS pattern as verify) |
+| `REFRESH_FROM_TOKEN` | `{refreshToken}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens, return new pair. Called by `/auth/refresh` (same CLS pattern) |
+| `SWITCH_FROM_TOKEN` | `{refreshToken, targetTenantSlug}` | `{accessToken, refreshToken, userId, tenantSlug}` | Switch tenant context, re-issue tokens. Called by `/auth/switch` |
 
 ### Session Patterns (Internal)
 
@@ -138,7 +138,7 @@ These consolidated patterns are called by the Gateway's thin proxy endpoints:
 |---------|-------|--------|-------------|
 | `LOGIN` | `{email, password, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | **Deprecated** — legacy login via tenant DB |
 | `CREATE_AUTHENTICATED_SESSION` | `{userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Create/reuse session after platform DB verification |
-| `CHECK_SESSION` | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session (called on every request by JwtStrategy) |
+| `CHECK_SESSION` | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session (called on every request by `createJwtAuthMiddleware` in the Gateway) |
 | `REFRESH_SESSION` | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Rotate tokens (internal, called by orchestrator) |
 | `REVOKE_SESSION` | `{sessionId, requestUserId, force}` | void | Revoke single session |
 | `SWITCH_SESSION_TENANT` | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch (internal) |

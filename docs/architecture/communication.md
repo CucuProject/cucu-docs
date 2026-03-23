@@ -145,6 +145,8 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 | `FIND_PERMISSIONS_BY_GROUP` | Message | `{groupId, entityName?}` | `Permission[]` | List field permissions |
 | `FIND_PAGE_PERMISSIONS_BY_GROUP` | Message | `{groupId}` | `PagePermission[]` | List page permissions |
 | `FIND_BULK_PERMISSIONS_MULTI` | Message | `{groupIds, entityNames?, opNames?}` | `BulkPermsDTO` | Bulk load for PermissionsCacheService |
+| `GET_MY_PERMISSIONS` | Message | `{groupIds}` | permissions object | Load all permissions for current user (used by `/auth/me`) |
+| `CHECK_OPERATION_PERMISSION` | Message | `{groupIds, operation}` | `{allowed: boolean}` | Check single operation permission (used by force-revoke) |
 
 ### GroupAssignments Service
 
@@ -247,52 +249,66 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 | `FIND_TENANT_BY_SLUG` | Message | `string` | `Tenant \| null` | Find by slug |
 | `RESOLVE_TENANT_BY_SLUG` | Message | `string` | `Tenant \| null` | Resolve active tenant |
 | `CHECK_SLUG_AVAILABILITY` | Message | `string` | `{valid, error?}` | Validate slug |
-| `BOOTSTRAP_TENANT` | Message | `{slug, name, ownerEmail, adminPassword, ...}` | `{success, tenantId}` | Create + provision |
-| `CHECK_PLATFORM_ADMIN` | Message | `{email}` | `{isPlatformAdmin}` | Admin check |
-| `VERIFY_IDENTITY_PASSWORD` | Message | `{email, password, tenantSlug}` | identity | Login verification |
-| `DISCOVER_TENANTS` | Message | `{email}` | memberships | List tenants for email |
+| `SIGNUP_TENANT` | Message | `SignupTenantRpcDto` | `{tenantId}` | Create tenant + provision (Gateway proxy) |
+| `GET_TENANT_STATUS` | Message | `{id}` | `{status, loginUrl?, error?}` | Poll provisioning status (Gateway proxy) |
+| `BOOTSTRAP_TENANT` | Message | `BootstrapTenantRpcDto` | `{success, tenantId}` | Create + provision (bootstrap only) |
+| `CHECK_PLATFORM_ADMIN` | Message | `{email}` | `{isPlatformAdmin}` | Admin check (user_identities primary, platform_admins fallback) |
+| `LOGIN_PLATFORM_ADMIN` | Message | `LoginPlatformAdminRpcDto` | admin record or null | Legacy admin login |
+| `SEED_PLATFORM_ADMIN` | Message | `{email, password, name, surname}` | `{success, skipped?}` | Bootstrap seeder |
+| `VERIFY_IDENTITY_PASSWORD` | Message | `VerifyIdentityPasswordRpcDto` | identity | Login verification |
+| `DISCOVER_TENANTS` | Message | `DiscoverTenantsRpcDto` | memberships | List tenants for email |
 | `SWITCH_TENANT` | Message | `{email, tenantSlug}` | `{userId, tenantSlug, tenantId}` | Tenant switch |
 | `GET_IDENTITY_MEMBERSHIPS` | Message | `{email}` | `{memberships, isPlatformAdmin}` | Full identity info |
-| `UPDATE_IDENTITY_PASSWORD` | Message | `{email, newPasswordHash}` | void | Update password |
-| `UPSERT_USER_IDENTITY` | Message | `{email, passwordHash, name, surname, ...}` | identity | Create/update identity |
+| `UPDATE_IDENTITY_PASSWORD` | Message | `UpdateIdentityPasswordRpcDto` | void | Update password |
+| `UPSERT_USER_IDENTITY` | Message | `UpsertUserIdentityRpcDto` | identity | Create/update identity |
 
 ## RPC Security
 
 ### RpcInternalGuard
 
-Protects sensitive bootstrap-only RPC endpoints from unauthorized callers:
+Registered **globally** via `createSubgraphMicroservice` — protects ALL RPC handlers from unauthorized callers. The `_internalSecret` is injected automatically by `TenantAwareClientProxy` into every RPC call.
+
+**Behavior:**
+- HTTP/GraphQL requests → pass through (those have their own guards)
+- Handlers decorated with `@SkipRpcGuard()` → bypass validation
+- All other RPC handlers → validates `_internalSecret` in payload using timing-safe comparison, then strips it before the handler runs
 
 ```typescript
-@UseGuards(RpcInternalGuard)
-@MessagePattern('CREATE_GROUP')
-async createGroup(@Payload() dto: CreateGroupInput) { ... }
+// The guard is global — no @UseGuards needed on individual handlers.
+// Handlers that should skip validation use:
+@SkipRpcGuard()
+@MessagePattern('SOME_PATTERN')
+async handler(@Payload() dto: SomeDto) { ... }
 ```
 
-The guard verifies `_internalSecret` in the payload using timing-safe comparison, then strips it before the handler runs:
-
-```typescript
-canActivate(context: ExecutionContext): boolean {
-  const data = context.switchToRpc().getData();
-  const internalSecret = data?._internalSecret;
-  if (!timingSafeEqual(secret, internalSecret)) throw new ForbiddenException();
-  delete data._internalSecret;
-  return true;
-}
-```
+**Fail-closed:** If `INTERNAL_HEADER_SECRET` is not set, all RPC requests are rejected.
 
 ### Gateway HMAC Signature
 
-The Gateway signs internal headers with HMAC-SHA256 using `INTERNAL_HEADER_SECRET`:
+The Gateway signs internal headers with HMAC-SHA256 using `INTERNAL_HEADER_SECRET`. The signature includes a **timestamp** for anti-replay protection:
 
 ```typescript
-const payload = `${userGroups}|${internalCall}|${userId}|${tenantSlug}|${tenantId}`;
+const timestamp = Date.now().toString();
+headers.set('x-gateway-timestamp', timestamp);
+
+const payload = `${userGroups}|${internalCall}|${userId}|${tenantSlug}|${tenantId}|${timestamp}`;
 const signature = createHmac('sha256', secret).update(payload).digest('hex');
 headers.set('x-gateway-signature', signature);
 ```
 
-Subgraphs verify this signature via `verifyGatewaySignature(headers)` before trusting any `x-user-*` or `x-tenant-*` headers. This prevents direct calls to subgraph HTTP endpoints from spoofing user identity.
+Subgraphs verify this signature via `verifyGatewaySignature(headers)` before trusting any `x-user-*` or `x-tenant-*` headers. **Requests older than 30 seconds are rejected** (anti-replay). This prevents direct calls to subgraph HTTP endpoints from spoofing user identity.
 
 See [Security](/shared/security.md) for details on `verifyGatewaySignature` and `RpcInternalGuard`.
+
+### RPC DTO Validation
+
+All RPC handlers across auth, users, and tenants services use **formal DTO classes** with `class-validator` decorators. The global `ValidationPipe` (configured in `createSubgraphMicroservice` with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`) validates payloads automatically.
+
+The `TenantClsInterceptor` strips transport metadata (`_tenantSlug`, `_tenantId`) and `RpcInternalGuard` strips `_internalSecret` from payloads **before** `ValidationPipe` runs, so DTOs only need to declare business-relevant fields.
+
+```
+Guard lifecycle: RpcInternalGuard → TenantClsInterceptor → ValidationPipe → Handler
+```
 
 ## Event-Driven Patterns
 

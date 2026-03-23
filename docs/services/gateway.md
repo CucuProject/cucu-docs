@@ -24,13 +24,14 @@ AppModule
 ├── TenantClsModule (nestjs-cls for tenant context)
 ├── MicroservicesOrchestratorModule
 ├── PassportModule (defaultStrategy: 'jwt')
-├── ThrottlerModule (60 req/60s global)
+├── ThrottlerModule (60 req/60s global, per-route overrides for signup/discover)
 ├── FederationModule (provides FederationTokenService from @cucu/security)
 ├── TenantAwareClientsModule (9 service clients)
 └── GraphQLModule (ApolloGatewayDriver + IntrospectAndCompose)
 
 Controllers:
 ├── AuthController (REST: thin proxy using TenantContextService for CLS tenant context)
+├── TenantsController (REST: signup, check-slug, status — proxied to Tenants via RPC)
 └── IntrospectionController
 
 Providers:
@@ -39,9 +40,12 @@ Providers:
 ├── ThrottlerGuard (APP_GUARD)
 └── TenantContextService (for auth controller CLS context)
 
+Express middleware (mounted in main.ts):
+├── Header sanitization (strips x-internal-federation-call, x-user-groups, x-user-id,
+│   x-gateway-signature, x-gateway-timestamp, x-tenant-slug, x-tenant-id, x-user-email)
 Express middleware (mounted in beforeStart):
 ├── cookieParser
-└── createJwtAuthMiddleware (JWT decode + CHECK_SESSION via RPC)
+└── createJwtAuthMiddleware (JWT decode + CHECK_SESSION via RPC, with 30s in-memory session cache)
 ```
 
 ### Thin Proxy Pattern
@@ -68,15 +72,32 @@ The Gateway registers clients for all services it needs to call via RPC:
 
 ## REST Endpoints
 
+### Auth Endpoints (`/auth`)
+
 | Method | Path | Auth | Rate Limit | Purpose |
 |--------|------|------|-----------|---------|
-| `POST` | `/auth/login` | `@Public()` | 100/15min | Login via platform DB |
+| `POST` | `/auth/login` | `@Public()` | Per-route (login) | Login via platform DB |
 | `POST` | `/auth/refresh` | `@Public()` | — | Token rotation via refresh cookie |
 | `POST` | `/auth/logout` | `GlobalAuthGuard` | — | Revoke session + clear cookie |
 | `GET` | `/auth/verify` | `@Public()` | — | Check refresh cookie validity |
-| `POST` | `/auth/discover` | `@Public()` | 10/1min | Find tenants for an email |
+| `GET` | `/auth/me` | `@Public()` | — | Get current user info + permissions (for Next.js RSC layouts) |
+| `POST` | `/auth/discover` | `@Public()` | Per-route (discover) | Find tenants for an email |
 | `POST` | `/auth/switch` | `GlobalAuthGuard` | — | Switch to different tenant |
-| `POST` | `/auth/force-revoke` | `GlobalAuthGuard` + SUPERADMIN | — | Revoke another user's session |
+| `POST` | `/auth/force-revoke` | `GlobalAuthGuard` + `forceRevokeSession` permission | — | Revoke another user's session |
+
+### Tenant Endpoints (`/tenants`)
+
+| Method | Path | Auth | Rate Limit | Purpose |
+|--------|------|------|-----------|---------|
+| `POST` | `/tenants/signup` | `@Public()` | Per-route (signup) | Create tenant + provision databases |
+| `GET` | `/tenants/check-slug/:slug` | `@Public()` | Per-route (discover) | Real-time slug availability check |
+| `GET` | `/tenants/status/:id` | `@Public()` | — | Poll provisioning status (validates ObjectId format) |
+
+The `TenantsController` is a thin proxy — each endpoint delegates to the Tenants service via RPC (`SIGNUP_TENANT`, `CHECK_SLUG_AVAILABILITY`, `GET_TENANT_STATUS`). The tenant HTTP endpoints were moved from the Tenants subgraph to the Gateway to consolidate all public-facing HTTP endpoints in a single service, simplify CORS/rate-limiting configuration, and avoid exposing subgraph HTTP ports to the internet.
+
+::: info
+The `resolve/:slug` endpoint remains in the Tenants subgraph (not the Gateway) because it's called server-to-server by the Next.js middleware, not by end-user browsers. It's protected by `TENANT_RESOLVE_SECRET` via the `x-internal-resolve` header.
+:::
 
 ## Authentication Flow
 
@@ -87,11 +108,35 @@ The primary authentication mechanism is an Express middleware (`createJwtAuthMid
 1. Extract Bearer token from `Authorization` header
 2. Decode JWT (no signature verification — that's done by the auth service during session check)
 3. Reject locally expired tokens (avoid unnecessary RPC)
-4. Run `CHECK_SESSION` RPC inside a CLS context (with `tenantSlug` from the JWT)
-5. If session is valid: set `req.user = { sub, sessionId, groups, tenantSlug, tenantId }`
-6. If session is invalid or RPC fails: leave `req.user` unset (fail-open for availability)
+4. **Check session cache** — in-memory cache with 30s TTL (see below)
+5. On cache miss: run `CHECK_SESSION` RPC inside a CLS context (with `tenantSlug` from the JWT)
+6. If session is valid: set `req.user = { sub, sessionId, groups, tenantSlug, tenantId }`
+7. If session is invalid: leave `req.user` unset (treat as unauthenticated)
+8. If RPC fails (auth service down): **return 503** (fail-closed, not fail-open)
 
 This approach was chosen because NestJS `@Injectable()` middlewares registered via `MiddlewareConsumer.forRoutes('*')` sometimes miss Apollo routes.
+
+### Session Cache
+
+The JWT auth middleware maintains an **in-memory, per-process session cache** to reduce RPC load:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `CACHE_TTL_MS` | 30,000 (30s) | How long a CHECK_SESSION result is cached |
+| `MAX_CACHE_SIZE` | 10,000 | Hard cap on cache entries (LRU eviction) |
+| Cleanup interval | 60s | Periodic removal of expired entries |
+
+**Trade-off**: After logout, a revoked session may remain "valid" in cache for up to 30 seconds. This is acceptable compared to complete unavailability during auth-service outages.
+
+The cache stores both valid and invalid (revoked) session results. Invalid sessions return `next()` without setting `req.user`, effectively treating the request as unauthenticated.
+
+### Error Sanitization (JwtStrategy)
+
+When `JwtStrategy.validate()` detects an invalid session, it:
+1. **Logs the actual reason internally** (e.g., `"Session invalid for sessionId=X: session revoked"`)
+2. **Throws a generic error** to the client: `"Invalid or expired session"`
+
+This prevents information leakage about session states to potential attackers.
 
 ### GlobalAuthGuard
 
@@ -121,8 +166,9 @@ The Gateway's `willSendRequest()` hook handles header propagation. It reads from
 4. Propagate tenant context from user JWT or request headers
 
 **All requests**:
-1. Compute HMAC-SHA256 signature of all internal headers using `INTERNAL_HEADER_SECRET`
-2. Set `x-gateway-signature` — subgraphs verify this before trusting any `x-*` headers
+1. Set `x-gateway-timestamp` to current epoch milliseconds (anti-replay)
+2. Compute HMAC-SHA256 signature of all internal headers **including timestamp** using `INTERNAL_HEADER_SECRET`
+3. Set `x-gateway-signature` — subgraphs verify this before trusting any `x-*` headers
 
 See [Security](/shared/security.md) for details on `FederationTokenService` and signature verification.
 
@@ -135,6 +181,34 @@ server: {
   plugins: allowIntrospection ? [] : [disableIntrospectionPlugin()],
 }
 ```
+
+## Dependencies
+
+### `@cucu/security`
+
+The Gateway is the **primary consumer** of `@cucu/security`. It uses both the signing and verification modules:
+
+| Export | Usage in Gateway |
+|--------|-----------------|
+| `FederationTokenService` | Generates self-signed RS256 JWTs for internal federation calls. Registered via `FederationModule` and used in `federation-request.options.ts` (`willSendRequest`). Reads private key from `FEDERATION_PRIVATE_KEY_PATH`. |
+| `verifyGatewaySignature()` | Not called directly by the Gateway (the Gateway *creates* signatures, subgraphs verify). However, it's re-exported from `@cucu/service-common` for use in `BaseSubgraphContext` and `PermissionsCacheService` on the receiving end. |
+
+The Gateway computes HMAC-SHA256 signatures directly in `federation-request.options.ts` using `crypto.createHmac()` and `INTERNAL_HEADER_SECRET`. It does **not** use `verifyGatewaySignature()` — that function is for subgraphs to verify incoming headers.
+
+### `@cucu/service-common`
+
+| Export | Usage |
+|--------|-------|
+| `createSubgraphMicroservice` | Bootstrap (with `inheritAppConfig: false`) |
+| `TenantClsStore`, `TenantContextService` | CLS tenant context for auth RPC calls |
+| `TenantAwareClientsModule` | Redis RPC clients with auto-injected `_tenantSlug` + `_internalSecret` |
+| `buildRedisTlsOptions` | Redis transport configuration |
+
+### Other Libraries
+
+- **`@cucu/microservices-orchestrator`** — dependency checking at startup
+- **`passport`, `passport-jwt`** — JWT strategy for access token validation
+- **`@nestjs/throttler`** — rate limiting on auth and tenant endpoints
 
 ## Key Design Decisions
 

@@ -31,8 +31,8 @@ bootstrap();
 6. **Check dependencies** — `areDependenciesReady(serviceName, redisConfig)`
 7. **Connect Redis microservice** — `Transport.REDIS` with mTLS, `inheritAppConfig: true` (default, overridable)
 8. **Register global guards** — `RpcInternalGuard` (fail-closed, validates `_internalSecret`)
-9. **Register global interceptors** — `TenantClsInterceptor` (reads tenant from CLS for HTTP, extracts from RPC payload for Redis)
-10. **Register global pipes** — `ValidationPipe` (whitelist, forbidNonWhitelisted, transform)
+9. **Register global interceptors** — `TenantClsInterceptor` (reads tenant from CLS for HTTP, extracts from RPC payload for Redis, strips `_tenantSlug`/`_tenantId` before ValidationPipe)
+10. **Register global pipes** — `ValidationPipe` with `whitelist: true`, `forbidNonWhitelisted: true`, `transform: true`. Runs **after** interceptors strip tenant transport fields — this is critical because `_tenantSlug` and `_internalSecret` are not declared in handler DTOs and would be rejected by `forbidNonWhitelisted`
 11. **Start microservices** — `app.startAllMicroservices()`
 12. **Listen HTTP** — `app.listen(port)` from `{PREFIX}_SERVICE_PORT`
 13. **Notify ready** — `orchestratorService.notifyServiceReady(serviceName, redisConfig)`
@@ -237,7 +237,7 @@ createSubgraphMicroservice(AppModule, 'GATEWAY', {
 });
 ```
 
-The Gateway also strips all internal headers (`x-internal-federation-call`, `x-user-groups`, `x-user-id`, `x-gateway-signature`, `x-tenant-slug`, `x-tenant-id`) from incoming client requests via Express middleware — preventing header spoofing.
+The Gateway also strips all internal headers (`x-internal-federation-call`, `x-user-groups`, `x-user-id`, `x-gateway-signature`, `x-gateway-timestamp`, `x-tenant-slug`, `x-tenant-id`, `x-user-email`) from incoming client requests via Express middleware — preventing header spoofing.
 
 ## Health Monitoring
 

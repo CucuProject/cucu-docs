@@ -259,7 +259,8 @@ The Gateway's `RemoteGraphQLDataSource.willSendRequest()` handles two scenarios:
 req.user (set by jwtAuthMiddleware — already ran CHECK_SESSION)
 → Strip Authorization header
 → Set: x-user-groups, x-user-id, x-user-email (decoded from JWT), x-tenant-slug, x-tenant-id
-→ HMAC sign all headers → x-gateway-signature
+→ Set: x-gateway-timestamp (anti-replay)
+→ HMAC sign all headers (including timestamp) → x-gateway-signature
 ```
 
 ### Internal Federation Calls
@@ -269,7 +270,8 @@ No Bearer token → get self-signed JWT from FederationTokenService (RS256, 60s 
 → Set: Authorization: Bearer {federationToken}, x-internal-federation-call: 1
 → Propagate user context if triggered by user request (Scenario D)
 → Propagate tenant context from user JWT or request headers
-→ HMAC sign all headers with INTERNAL_HEADER_SECRET → x-gateway-signature
+→ Set: x-gateway-timestamp (anti-replay)
+→ HMAC sign all headers (including timestamp) with INTERNAL_HEADER_SECRET → x-gateway-signature
 ```
 
 See [Security](/shared/security.md) for details on `FederationTokenService` and `verifyFederationJwt`.

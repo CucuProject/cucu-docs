@@ -87,10 +87,16 @@ class PlatformAdmin {
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| `GET` | `/tenants/resolve/:slug` | `x-internal-resolve` header | Resolve tenant config by slug (for FE middleware) |
-| `GET` | `/tenants/check-slug/:slug` | Public | Real-time slug validation for signup form |
-| `POST` | `/tenants/signup` | Public | Create tenant + provision databases |
-| `GET` | `/tenants/status/:id` | Public | Poll provisioning status |
+| `GET` | `/tenants/resolve/:slug` | `x-internal-resolve` header (`TENANT_RESOLVE_SECRET`) | Resolve tenant config by slug (for FE middleware) |
+
+::: warning Tenant Endpoints Moved to Gateway
+The following endpoints were **moved to the Gateway** (`TenantsController`) as of F-043:
+- `POST /tenants/signup` → Gateway proxies to `SIGNUP_TENANT` RPC
+- `GET /tenants/check-slug/:slug` → Gateway proxies to `CHECK_SLUG_AVAILABILITY` RPC
+- `GET /tenants/status/:id` → Gateway proxies to `GET_TENANT_STATUS` RPC
+
+This consolidates all public-facing HTTP endpoints in the Gateway. The `resolve/:slug` endpoint remains in the Tenants subgraph because it's called server-to-server by Next.js middleware, protected by `TENANT_RESOLVE_SECRET` via timing-safe comparison of the `x-internal-resolve` header.
+:::
 
 ## GraphQL Schema
 
@@ -128,26 +134,42 @@ class PlatformAdmin {
 | `FIND_TENANT_BY_SLUG` | `string` | `Tenant \| null` | Find by slug |
 | `RESOLVE_TENANT_BY_SLUG` | `string` | `Tenant \| null` | Resolve active tenant |
 | `CHECK_SLUG_AVAILABILITY` | `string` | `{valid, error?}` | Validate slug |
-| `BOOTSTRAP_TENANT` | `{slug, name, ownerEmail, adminPassword, ...}` | `{success, tenantId, skipped?}` | Create + provision (idempotent) |
+| `SIGNUP_TENANT` | `SignupTenantRpcDto` | `{tenantId}` | Create tenant + provision databases (called by Gateway) |
+| `GET_TENANT_STATUS` | `{id}` | `{status, loginUrl?, error?}` | Poll provisioning status (called by Gateway) |
+| `BOOTSTRAP_TENANT` | `BootstrapTenantRpcDto` | `{success, tenantId, skipped?}` | Create + provision (idempotent, bootstrap only) |
 
 ### Universal Auth
 
 | Pattern | Input | Output | Purpose |
 |---------|-------|--------|---------|
-| `VERIFY_IDENTITY_PASSWORD` | `{email, password, tenantSlug}` | identity record | Verify password + check tenant membership |
-| `DISCOVER_TENANTS` | `{email}` | `{memberships}` | List tenants for an email |
+| `VERIFY_IDENTITY_PASSWORD` | `VerifyIdentityPasswordRpcDto` | identity record | Verify password + check tenant membership |
+| `DISCOVER_TENANTS` | `DiscoverTenantsRpcDto` | `{memberships}` | List tenants for an email |
 | `SWITCH_TENANT` | `{email, tenantSlug}` | `{userId, tenantSlug, tenantId}` | Verify membership for tenant switch |
 | `GET_IDENTITY_MEMBERSHIPS` | `{email}` | `{memberships, isPlatformAdmin}` | Full identity info |
-| `UPDATE_IDENTITY_PASSWORD` | `{email, newPasswordHash}` | void | Update password hash |
-| `UPSERT_USER_IDENTITY` | `{email, passwordHash, name, surname, ...}` | identity | Create/update identity with membership |
+| `UPDATE_IDENTITY_PASSWORD` | `UpdateIdentityPasswordRpcDto` | void | Update password hash |
+| `UPSERT_USER_IDENTITY` | `UpsertUserIdentityRpcDto` | identity | Create/update identity with membership |
 
 ### Platform Admin
 
 | Pattern | Input | Output | Purpose |
 |---------|-------|--------|---------|
 | `CHECK_PLATFORM_ADMIN` | `{email}` | `{isPlatformAdmin}` | Check via user_identities (primary) + platform_admins (fallback) |
-| `LOGIN_PLATFORM_ADMIN` | `{email, password}` | admin record or null | Legacy admin login |
+| `LOGIN_PLATFORM_ADMIN` | `LoginPlatformAdminRpcDto` | admin record or null | Legacy admin login |
 | `SEED_PLATFORM_ADMIN` | `{email, password, name, surname}` | admin | Bootstrap seeder |
+
+### RPC DTO Validation
+
+All RPC handlers use formal DTOs validated by the global `ValidationPipe`:
+
+| DTO | Pattern | Fields |
+|-----|---------|--------|
+| `SignupTenantRpcDto` | `SIGNUP_TENANT` | `slug, name, ownerEmail, adminPassword, adminName, adminSurname, plan?` |
+| `VerifyIdentityPasswordRpcDto` | `VERIFY_IDENTITY_PASSWORD` | `email, password, tenantSlug` |
+| `LoginPlatformAdminRpcDto` | `LOGIN_PLATFORM_ADMIN` | `email, password` |
+| `BootstrapTenantRpcDto` | `BOOTSTRAP_TENANT` | `slug, name, ownerEmail, adminPassword, adminName, adminSurname, plan?` |
+| `DiscoverTenantsRpcDto` | `DISCOVER_TENANTS` | `email` |
+| `UpdateIdentityPasswordRpcDto` | `UPDATE_IDENTITY_PASSWORD` | `email, newPasswordHash` |
+| `UpsertUserIdentityRpcDto` | `UPSERT_USER_IDENTITY` | `email, passwordHash, name, surname, isPlatformAdmin?, membership?` |
 
 ## Provisioning
 

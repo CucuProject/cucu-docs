@@ -172,9 +172,13 @@ Dynamic whitelist management for runtime tenant provisioning/deprovisioning.
 Returns a Mongoose connection for the given tenant. **Synchronous** once the base connection is established (Mongoose's `useDb` is sync).
 
 **Validation chain:**
-1. **Slug format:** Must match `/^[a-z0-9][a-z0-9-]*$/` — rejects invalid slugs before they become database names
-2. **The Wall:** If `knownTenants` is populated, rejects any slug not in the set
-3. **Pool cap:** If `pools.size >= MAX_POOLS`, triggers cleanup. If still at cap, throws
+1. **Slug format:** Must match `/^[a-z0-9][a-z0-9-]*$/` — rejects invalid slugs before they become database names → throws `BadRequestException`
+2. **The Wall:** If `knownTenants` is populated, rejects any slug not in the set → throws `NotFoundException`
+3. **Pool cap:** If `pools.size >= MAX_POOLS`, triggers cleanup. If still at cap → throws `InternalServerErrorException`
+
+::: info NestJS Exception Types
+`TenantConnectionManager` throws NestJS HTTP exceptions (`BadRequestException`, `NotFoundException`, `InternalServerErrorException`) instead of generic `Error` instances. This allows NestJS exception filters to return proper HTTP status codes (400, 404, 500) when tenant context errors reach the HTTP layer.
+:::
 4. **Cache hit:** If connection exists in `pools`, update `lastAccess` and return it
 5. **Cache miss:** Create via `baseConnection.useDb(dbName, { useCache: true })`
 
@@ -301,6 +305,19 @@ export function withTenantId<T extends Record<string, any>>(
 - **GDPR data export certification** — prove which tenant owns which data
 - **Audit trail post-mortem** — trace data provenance after incidents
 - **Future DB consolidation** — if the system ever moves to logical isolation
+
+---
+
+## Test Suite
+
+`@cucu/tenant-db` has **30 tests** covering `TenantConnectionManager`:
+
+- Connection lifecycle — init, getConnection, getCurrentConnection
+- The Wall — whitelist enforcement, unknown tenant rejection
+- Pool management — MAX_POOLS cap, idle cleanup, graceful shutdown
+- Slug validation — regex enforcement, invalid format rejection
+- CLS context integration — tenant slug reading from `ClsService`
+- Model caching — schema registration, model reuse per connection
 
 ---
 

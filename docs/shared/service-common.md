@@ -78,7 +78,13 @@ graph TB
 | `buildSortObject` | Function | Converts `SortInput` to Mongoose sort object |
 | `ParseMongoIdPipe` | Pipe | Validates MongoDB ObjectId strings |
 | `assertObjectId` | Function | Throws `BadRequestException` for invalid ObjectIds |
-| `buildRedisTlsOptions` | Function | Builds Redis connection config with optional TLS |
+| `buildRedisTlsOptions` | Function | Builds Redis connection config with optional TLS (enforces TLS in production) |
+| `PASSWORD_COMPLEXITY_REGEX` | RegExp | Password complexity validation pattern |
+| `PASSWORD_COMPLEXITY_MESSAGE` | string | Default error message for password validation |
+| `validatePasswordComplexity` | Function | Pure validation function (no framework deps, usable in FE) |
+| `PasswordComplexityConstraint` | class-validator Constraint | Validator class for `class-validator` |
+| `IsStrongPassword` | Decorator | Property decorator for password fields — applies complexity rules |
+| `SkipRpcGuard` | Decorator | Marks a handler/class to skip `RpcInternalGuard` validation |
 
 ---
 
@@ -240,10 +246,13 @@ class TenantAwareClientProxy extends ClientProxy {
 
 **Enrichment rules:**
 1. Reads tenant slug via `this.cls?.get('tenantSlug')` (CLS context)
-2. If no tenant context is active → payload unchanged (platform-level calls)
-3. If payload already has `_tenantSlug` → don't overwrite
-4. If payload is an object → spread `_tenantSlug` into it
-5. If payload is a primitive → wrap: `{ _payload: data, _tenantSlug: slug }`
+2. Reads `_internalSecret` from constructor parameter (passed by `TenantAwareClientsModule`)
+3. If no tenant context and no secret → payload unchanged
+4. If payload already has `_tenantSlug` or `_internalSecret` → don't overwrite
+5. If payload is an object → spread metadata fields into it
+6. If payload is a primitive → wrap: `{ _payload: data, _tenantSlug: slug, _internalSecret: secret }`
+
+The proxy also injects `_internalSecret` for RPC authentication via `RpcInternalGuard` — this means **all RPC calls** are authenticated by default, not just bootstrap-specific ones.
 
 ### `TenantAwareClientsModule`
 
@@ -348,7 +357,7 @@ Request-scoped guard that checks whether the current user can execute a GraphQL 
 
 **Bypass conditions (in order):**
 1. RPC calls → always pass (service-to-service trust)
-2. Missing `permCache` or `sctx` → pass (safe fallback during init)
+2. Missing `permCache` or `sctx` → throws `ForbiddenException('Permission system unavailable — access denied')` (fail-closed)
 3. Internal federation calls without user context → pass (schema stitching, introspection)
 4. Normal requests → extract operation name from GraphQL `info`, call `permCache.ensureOpAllowed()`
 
@@ -473,9 +482,9 @@ Security verification functions are now provided by `@cucu/security` and re-expo
 Re-exported from `@cucu/security`. Verifies that internal HTTP headers (`x-user-groups`, `x-internal-federation-call`, `x-user-id`, `x-tenant-slug`, `x-tenant-id`) were set by the gateway and not spoofed by a direct caller.
 
 **Algorithm:**
-1. Gateway computes: `HMAC-SHA256(secret, "x-user-groups|x-internal-federation-call|x-user-id|x-tenant-slug|x-tenant-id")`
-2. Sends result as `x-gateway-signature` header
-3. Each service recomputes and compares using `crypto.timingSafeEqual()`
+1. Gateway computes: `HMAC-SHA256(secret, "x-user-groups|x-internal-federation-call|x-user-id|x-tenant-slug|x-tenant-id|x-gateway-timestamp")`
+2. Sends result as `x-gateway-signature` header (with `x-gateway-timestamp` for anti-replay)
+3. Each service recomputes and compares using `crypto.timingSafeEqual()`. Requests older than 30 seconds are rejected.
 
 **Secret:** `process.env.INTERNAL_HEADER_SECRET` (fails closed if not set).
 
@@ -559,6 +568,52 @@ enum SortOrder { ASC = 'ASC', DESC = 'DESC' }
 
 ---
 
+## Validators
+
+**File:** `src/validators/password-complexity.validator.ts`
+
+The `validators/` module provides password complexity validation primitives shared between backend and frontend:
+
+### `PASSWORD_COMPLEXITY_REGEX`
+
+```typescript
+export const PASSWORD_COMPLEXITY_REGEX =
+  /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]).*$/;
+```
+
+Requires at least one uppercase letter, one lowercase letter, one digit, and one special character.
+
+### `validatePasswordComplexity(value: unknown): boolean`
+
+Pure validation function — no framework dependencies. Returns `true` if the value matches the complexity regex. Can be used directly in frontend form validation hooks.
+
+### `@IsStrongPassword()` Decorator
+
+`class-validator` property decorator that applies `PasswordComplexityConstraint`:
+
+```typescript
+@IsStrongPassword()
+newPassword: string;
+```
+
+When `DEV_MODE=true` environment variable is set, the constraint is bypassed (always returns `true`) to simplify development workflows.
+
+---
+
+## Test Suite
+
+`@cucu/service-common` has **63 tests** covering:
+
+- `buildRedisTlsOptions` — TLS cert loading, production enforcement, fallback behavior
+- `TenantClsInterceptor` — HTTP/RPC tenant extraction, payload stripping, primitive unwrapping
+- `TenantAwareClientProxy` — CLS-based tenant injection, internal secret injection
+- `TenantContextService` — CLS context access, `run()` method
+- `RpcInternalGuard` — secret validation, timing-safe comparison, payload cleanup
+- `BaseSubgraphContext` — header extraction, gateway signature verification
+- Password complexity validators — regex, decorator, DEV_MODE bypass
+
+---
+
 ## Utilities
 
 ### `buildProjection(viewable: Set<string>): Record<string, 1>`
@@ -571,7 +626,11 @@ Converts a `SortInput` DTO to a Mongoose-compatible sort object. Defaults to `{ 
 
 ### `buildRedisTlsOptions(cfg, envPrefix)`
 
-Reads Redis connection config from `ConfigService`. If TLS certs are available (`{PREFIX}_REDIS_TLS_CLIENT_CERT`, `{PREFIX}_REDIS_TLS_CLIENT_KEY`, `REDIS_TLS_CA_CERT`), returns TLS-enabled config. Otherwise falls back to plain connection with a console warning.
+Reads Redis connection config from `ConfigService`. If TLS certs are available (`{PREFIX}_REDIS_TLS_CLIENT_CERT`, `{PREFIX}_REDIS_TLS_CLIENT_KEY`, `REDIS_TLS_CA_CERT`), returns TLS-enabled config.
+
+::: danger Production TLS Enforcement
+In production (`NODE_ENV=production`), if TLS certificates are not found, `buildRedisTlsOptions` **throws an error** and refuses to start the service. This prevents accidental unencrypted Redis communication in production environments. The fallback to plain TCP is only available in non-production environments, with a console warning.
+:::
 
 ### `ParseMongoIdPipe`
 

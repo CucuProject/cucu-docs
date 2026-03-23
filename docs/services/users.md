@@ -153,16 +153,18 @@ billable: boolean              // default: false
 
 ### MessagePattern Handlers
 
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `USER_EXISTS` | `string \| {id}` | `boolean` | Check if user exists |
+All RPC handlers use formal DTOs with `class-validator` decorators, validated by the global `ValidationPipe`:
+
+| Pattern | DTO | Output | Purpose |
+|---------|-----|--------|---------|
+| `USER_EXISTS` | `UserExistsRpcDto` | `boolean` | Check if user exists |
 | `CREATE_USER` | `CreateUserInput` | `User` | Create user (bootstrap) |
-| `FIND_USER_BY_EMAIL` | `{email, forAuth?}` | `{_id, password?, groupIds} \| null` | Find by email. `forAuth=true` returns password hash (deprecated) |
-| `FIND_USER_WITH_PASSWORD` | `{userId}` | `{_id, password, email} \| null` | Get password hash (for changePassword) |
+| `FIND_USER_BY_EMAIL` | `FindUserByEmailRpcDto` | `{_id, password?, groupIds} \| null` | Find by email. `forAuth=true` returns password hash (deprecated) |
+| `FIND_USER_WITH_PASSWORD` | `FindUserWithPasswordRpcDto` | `{_id, password, email} \| null` | Get password hash (for changePassword) |
 | `UPDATE_USER` | `UpdateUserInput` | `User` | Update user (bootstrap) |
-| `UPDATE_USER_PASSWORD` | `{userId, newPasswordHash}` | void | Update password hash (pre-hashed) |
-| `FIND_GROUPIDS_BY_USERID` | `{userId}` | `{groupIds: string[]}` | Get group IDs for a user |
-| `GET_ORG_ENTITY_USAGE_COUNT` | `{field, id}` | `number` | Count users referencing a lookup entity |
+| `UPDATE_USER_PASSWORD` | `UpdateUserPasswordRpcDto` | void | Update password hash (pre-hashed) |
+| `FIND_GROUPIDS_BY_USERID` | `FindGroupIdsRpcDto` | `{groupIds: string[]}` | Get group IDs for a user |
+| `GET_ORG_ENTITY_USAGE_COUNT` | `OrgEntityUsageCountRpcDto` | `number` | Count users referencing a lookup entity |
 
 ### EventPattern Handlers
 

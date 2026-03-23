@@ -57,8 +57,11 @@ ALLOW_INTROSPECTION=true   # false in production
 # CRITICAL: Must be same across all services
 INTERNAL_HEADER_SECRET=cucu-dev-hmac-change-me-in-production
 
-# JWT (must match between gateway and auth)
+# JWT signing (must match between gateway and auth)
 JWT_SECRET=ProdSecretKey
+
+# JWT verification (used by gateway JwtStrategy to verify access tokens)
+JWT_PUBLIC_KEY_PATH=/certs/jwt.pub
 
 # Federation JWT Signing (RS256)
 # Required by Gateway for signing federation JWTs
@@ -66,6 +69,12 @@ FEDERATION_PRIVATE_KEY_PATH=/certs/federation.key
 
 # Required by subgraphs for verifying federation JWTs
 FEDERATION_PUBLIC_KEY_PATH=/certs/federation.pub
+
+# Tenant resolve endpoint protection (used by Next.js middleware → tenants subgraph)
+TENANT_RESOLVE_SECRET=cucu-resolve-secret-change-me-in-production
+
+# Development mode — bypasses password complexity validation
+DEV_MODE=true  # only in development
 ```
 
 See [Security](/shared/security.md) for details on federation JWT signing.
@@ -324,11 +333,14 @@ These must be set for the platform to function:
 
 - `INTERNAL_HEADER_SECRET` — fail-closed HMAC signing (RpcInternalGuard rejects if missing)
 - `JWT_SECRET` — must match between gateway and auth
+- `JWT_PUBLIC_KEY_PATH` — required by gateway JwtStrategy for access token verification (RS256)
 - `MONGODB_URI` (per service)
 - `REDIS_SERVICE_HOST`
 - `<SERVICE>_SERVICE_PORT`
 - `FEDERATION_PRIVATE_KEY_PATH` — required by Gateway for federation JWT signing
 - `FEDERATION_PUBLIC_KEY_PATH` — required by subgraphs for federation JWT verification
+- `TENANT_RESOLVE_SECRET` — required by tenants service for `resolve/:slug` endpoint protection
+- Redis TLS certs in production — `buildRedisTlsOptions` **throws** if certs missing when `NODE_ENV=production`
 
 ### Optional Variables
 
@@ -338,6 +350,7 @@ These have sensible defaults:
 - `JWT_EXPIRES_IN` (default: 15m)
 - `SESSION_IDLE_TIMEOUT` (default: 4h)
 - `MAX_SESSION_AGE` (default: 24h)
+- `DEV_MODE` (default: unset — when `true`, bypasses password complexity validation)
 
 ## Variable Validation
 

@@ -27,6 +27,7 @@ The Cucu platform is a **multi-tenant, distributed microservices architecture** 
 | **organization** | 3012 | `organization_{tenant}` | Lookup tables: SeniorityLevel, JobRole, Company, RoleCategory |
 | **holidays** | 3013 | `holidays` (shared) + `holidays_{tenant}` | National holidays (shared), company closures, user absences |
 | **tenants** | 3002 | Platform DB (shared) | Tenant registry, user identities, provisioning, `resolve/:slug` HTTP endpoint |
+| **audit** | 3015 | `audit` (centralized) | Audit trail — persists security events via `AUDIT_EVENT` pattern |
 | **bootstrap** | 3100 | N/A (RPC client) | Seed data initialization, multi-tenant provisioning |
 
 ## Architecture Diagram
@@ -56,6 +57,7 @@ graph TB
         ORG[Organization :3012]
         HOLIDAYS[Holidays :3013]
         TENANTS[Tenants :3002]
+        AUDIT[Audit :3015]
     end
 
     subgraph "Infrastructure"
@@ -67,6 +69,9 @@ graph TB
     Client -->|HTTPS| GW
     GW -->|Redis RPC| AUTH
     GW -->|Federation HTTP| AUTH & USERS & PROJECTS & MILESTONES & M2U & M2P & GA & PA & GRANTS & ORG & HOLIDAYS & TENANTS
+
+    AUTH -->|emit AUDIT_EVENT| AUDIT
+    AUDIT --> MONGODB
 
     AUTH --> REDIS
     AUTH --> MONGODB

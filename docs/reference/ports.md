@@ -17,6 +17,7 @@ This document lists all port assignments for services and databases in the Cucu 
 | **project-access** | 3008 | Project Access Control |
 | **grants** | 3010 | Permissions & Groups |
 | **organization** | 3012 | Lookup Tables |
+| **audit** | 3015 | Audit Trail (event consumer) |
 | **bootstrap** | 3100 | Seed Data (one-time) |
 
 ## Database Ports
@@ -33,6 +34,7 @@ This document lists all port assignments for services and databases in the Cucu 
 | **project-access** | 9008 | project-access |
 | **grants** | 9010 | grants |
 | **organization** | 9012 | organization |
+| **audit** | 9015 | audit |
 
 ## Redis Ports
 
@@ -157,7 +159,7 @@ services:
 
 When adding a new service, assign the next available ports:
 
-1. Service port: Next after 3012 (e.g., 3013, 3014, ...)
-2. Database port: Next after 9012 (e.g., 9013, 9014, ...)
+1. Service port: Next after 3015 (e.g., 3016, 3017, ...)
+2. Database port: Next after 9015 (e.g., 9016, 9017, ...)
 
 Update this document with the new assignments.

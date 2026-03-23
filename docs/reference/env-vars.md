@@ -284,6 +284,20 @@ MONGODB_URI=mongodb://organization-db:27017/organization
 ORGANIZATION_DEPENDENCIES=[]
 ```
 
+## Audit Service
+
+```ini
+# Service Identity
+AUDIT_SERVICE_NAME=audit
+AUDIT_SERVICE_PORT=3015
+
+# Database (centralized — not per-tenant)
+AUDIT_MONGO_URI=mongodb://audit-db:9015/audit
+
+# Dependencies (none — pure event consumer)
+AUDIT_DEPENDENCIES=[]
+```
+
 ## Bootstrap Service
 
 ```ini

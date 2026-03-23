@@ -38,6 +38,7 @@ export default defineConfig({
             { text: 'Apollo Federation', link: '/architecture/federation' },
             { text: 'Service Communication', link: '/architecture/communication' },
             { text: 'Authentication Flow', link: '/architecture/auth-flow' },
+            { text: 'Multi-Tenant', link: '/architecture/multi-tenant' },
             { text: 'Permission System', link: '/architecture/permissions' },
             { text: 'Service Startup', link: '/architecture/startup' },
           ]
@@ -48,14 +49,18 @@ export default defineConfig({
           items: [
             { text: 'Gateway', link: '/services/gateway' },
             { text: 'Auth', link: '/services/auth' },
-            { text: 'Users', link: '/services/users' },
             { text: 'Grants', link: '/services/grants' },
             { text: 'Group Assignments', link: '/services/group-assignments' },
-            { text: 'Projects', link: '/services/projects' },
-            { text: 'Milestones', link: '/services/milestones' },
-            { text: 'Milestone to User', link: '/services/milestone-to-user' },
+            { text: 'Holidays', link: '/services/holidays' },
             { text: 'Milestone to Project', link: '/services/milestone-to-project' },
+            { text: 'Milestone to User', link: '/services/milestone-to-user' },
+            { text: 'Milestones', link: '/services/milestones' },
+            { text: 'Organization', link: '/services/organization' },
             { text: 'Project Access', link: '/services/project-access' },
+            { text: 'Projects', link: '/services/projects' },
+            { text: 'Tenants', link: '/services/tenants' },
+            { text: 'Users', link: '/services/users' },
+            { text: 'Audit', link: '/services/audit' },
             { text: 'Bootstrap', link: '/services/bootstrap' },
           ]
         },
@@ -65,7 +70,11 @@ export default defineConfig({
           items: [
             { text: 'Service Common', link: '/shared/service-common' },
             { text: 'Field-Level Grants', link: '/shared/field-level-grants' },
+            { text: 'Microservices Orchestrator', link: '/shared/microservices-orchestrator' },
             { text: 'Permission Rules', link: '/shared/permission-rules' },
+            { text: 'Project Utils', link: '/shared/project-utils' },
+            { text: 'Security', link: '/shared/security' },
+            { text: 'Tenant DB', link: '/shared/tenant-db' },
           ]
         },
         {

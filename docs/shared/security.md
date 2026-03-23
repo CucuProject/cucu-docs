@@ -112,19 +112,23 @@ function verifyGatewaySignature(headers: Record<string, any>): boolean
 
 ### Algorithm
 
-1. Gateway computes HMAC-SHA256:
+1. Gateway computes HMAC-SHA256 (including timestamp for anti-replay):
    ```
-   payload = "x-user-groups|x-internal-federation-call|x-user-id|x-tenant-slug|x-tenant-id"
+   timestamp = Date.now().toString()
+   headers['x-gateway-timestamp'] = timestamp
+   payload = "x-user-groups|x-internal-federation-call|x-user-id|x-tenant-slug|x-tenant-id|timestamp"
    signature = HMAC-SHA256(INTERNAL_HEADER_SECRET, payload)
    ```
-2. Gateway sets `x-gateway-signature` header with the result
+2. Gateway sets `x-gateway-signature` and `x-gateway-timestamp` headers
 3. Subgraphs recompute and compare using `crypto.timingSafeEqual()`
+4. **Requests older than 30 seconds are rejected** (anti-replay protection)
 
 ### Security Properties
 
 - **Timing-safe**: Uses `timingSafeEqual` to prevent timing attacks
 - **Fail-closed**: Returns `false` if `INTERNAL_HEADER_SECRET` is not set
 - **Length check**: Returns `false` if signature lengths don't match (before timing-safe comparison)
+- **Anti-replay**: Includes `x-gateway-timestamp` in HMAC payload; rejects if `|Date.now() - timestamp| > 30000ms`
 
 ### Required Environment Variables
 
@@ -265,14 +269,28 @@ This package replaces `@cucu/keycloak-m2m` which was removed in March 2026. Key 
 
 ---
 
+## Test Suite
+
+`@cucu/security` has **16 tests** covering:
+
+- `FederationTokenService` — key loading, token generation, caching, rotation near expiry, fail-fast on missing config
+- `verifyFederationJwt` — valid tokens, expired tokens, wrong issuer/subject, missing key file, invalid signatures
+- `verifyGatewaySignature` — valid signatures, timestamp freshness, missing secret, tampered headers, timing-safe comparison
+
+---
+
 ## Used By
 
 | Component | Package | Usage |
 |-----------|---------|-------|
-| `federation-request.options.ts` | Gateway | Signs federation calls with `FederationTokenService` |
+| `federation-request.options.ts` | Gateway | Signs federation calls with `FederationTokenService`. Also computes HMAC-SHA256 signatures directly via `crypto.createHmac()` using `INTERNAL_HEADER_SECRET`. |
 | `PermissionsCacheService` | service-common | Verifies headers with `verifyGatewaySignature`, `verifyFederationJwt` |
 | `BaseSubgraphContext` | service-common | Verifies headers with `verifyGatewaySignature` |
 | `RpcInternalGuard` | service-common | Uses `INTERNAL_HEADER_SECRET` for RPC auth (same secret) |
+
+::: info Gateway is the primary consumer
+The Gateway directly imports `@cucu/security` for `FederationTokenService`. All other services consume `@cucu/security` indirectly via `@cucu/service-common`, which re-exports `verifyGatewaySignature`, `verifyFederationJwt`, and `FederationTokenService` for backward compatibility.
+:::
 
 ---
 

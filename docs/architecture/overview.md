@@ -26,7 +26,7 @@ The Cucu platform is a **multi-tenant, distributed microservices architecture** 
 | **grants** | 3010 | `grants_{tenant}` | Groups, Permissions, OperationPermissions, PagePermissions |
 | **organization** | 3012 | `organization_{tenant}` | Lookup tables: SeniorityLevel, JobRole, Company, RoleCategory |
 | **holidays** | 3013 | `holidays` (shared) + `holidays_{tenant}` | National holidays (shared), company closures, user absences |
-| **tenants** | 3002 | Platform DB (shared) | Tenant registry, user identities, provisioning |
+| **tenants** | 3002 | Platform DB (shared) | Tenant registry, user identities, provisioning, `resolve/:slug` HTTP endpoint |
 | **bootstrap** | 3100 | N/A (RPC client) | Seed data initialization, multi-tenant provisioning |
 
 ## Architecture Diagram
@@ -187,13 +187,23 @@ graph LR
 
 | Invariant | Implementation |
 |-----------|---------------|
-| **Signed Headers** | Gateway HMAC-signs `x-user-groups`, `x-user-id`, `x-tenant-slug`, `x-tenant-id` with `INTERNAL_HEADER_SECRET`. Subgraphs verify via `verifyGatewaySignature()` |
+| **Signed Headers** | Gateway HMAC-signs `x-user-groups`, `x-user-id`, `x-tenant-slug`, `x-tenant-id`, `x-gateway-timestamp` with `INTERNAL_HEADER_SECRET`. Includes timestamp for anti-replay (30s window). Subgraphs verify via `verifyGatewaySignature()` |
 | **Physical DB Isolation** | `TenantConnectionManager` creates per-tenant connections: `{serviceName}_{tenantSlug}`. The "Wall" rejects unknown tenant slugs |
 | **Permission Cache** | 5-minute process-wide TTL with instant invalidation on `PERMISSIONS_CHANGED` events |
 | **Soft Deletes** | Users use `deletedAt` timestamp; hard delete available as separate operation |
 | **Session-Based Auth** | JWT access token (short-lived) + httpOnly refresh cookie (7d) + server-side session in MongoDB |
 | **Tenant Context Propagation** | HTTP: `x-tenant-slug` header read by `ClsMiddleware` (from `nestjs-cls`). RPC: `_tenantSlug` field auto-injected by `TenantAwareClientProxy`, read by `TenantClsInterceptor`, stored in CLS context via `ClsService` |
-| **RPC Security** | Bootstrap-only mutations use `RpcInternalGuard` with `_internalSecret` in payload |
+| **RPC Security** | `RpcInternalGuard` validates `_internalSecret` on ALL RPC handlers (injected by `TenantAwareClientProxy`). `@SkipRpcGuard()` exempts specific handlers. |
+
+## Test Coverage
+
+| Repository | Tests | Scope |
+|-----------|-------|-------|
+| `cucu-nest` | 130 | Gateway (JWT middleware, session cache, auth controller), Auth (orchestrator, session, token), Tenants (provisioning, identity), Grants (permissions, guards) |
+| `@cucu/service-common` | 63 | Redis TLS, TenantClsInterceptor, TenantAwareClientProxy, RpcInternalGuard, BaseSubgraphContext, password validators |
+| `@cucu/tenant-db` | 30 | TenantConnectionManager (lifecycle, whitelist, pool, cleanup) |
+| `@cucu/security` | 16 | FederationTokenService, verifyFederationJwt, verifyGatewaySignature |
+| **Total** | **239** | |
 
 ## Technology Stack
 
@@ -203,9 +213,9 @@ graph LR
 | GraphQL | Apollo Federation 2 (IntrospectAndCompose) |
 | Database | MongoDB (per-tenant via Mongoose `useDb`) |
 | Transport | Redis with mTLS (microservice RPC + event bus + cache) |
-| Auth | Passport.js + JWT + bcryptjs |
-| Security | `@cucu/security` (RS256 federation JWTs, HMAC signature verification) |
-| Shared Infra | `@cucu/service-common` (guards, interceptors, context, bootstrap) |
+| Auth | Passport.js + JWT (RS256) + bcryptjs |
+| Security | `@cucu/security` (RS256 federation JWTs, HMAC signature verification with anti-replay) |
+| Shared Infra | `@cucu/service-common` (guards, interceptors, context, bootstrap, validators) |
 | Multi-tenancy | `@cucu/tenant-db` (connection pooling) + `@cucu/service-common` (`nestjs-cls` context via `TenantClsModule`) |
 | Orchestration | `@cucu/microservices-orchestrator` (dependency checking at startup) |
 

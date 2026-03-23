@@ -48,7 +48,7 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 | `FIND_USER_BY_EMAIL` | Message | `{ email, forAuth? }` | `{ _id, password?, groupIds }` or `null` |
 | `FIND_USER_WITH_PASSWORD` | Message | `{ userId }` | `{ _id, password }` or `null` |
 | `UPDATE_USER` | Message | `UpdateUserInput` | `User` |
-| `UPDATE_USER_PASSWORD` | Message | `{ userId, newPassword }` | `void` |
+| `UPDATE_USER_PASSWORD` | Message | `{ userId, newPasswordHash }` | `void` |
 | `FIND_GROUPIDS_BY_USERID` | Message | `{ userId }` | `{ groupIds: string[] }` |
 | `GET_ORG_ENTITY_USAGE_COUNT` | Message | `{ field, id }` | `number` |
 | `USER_GROUPS_CHANGED` | Event | `{ userId }` | N/A |
@@ -70,6 +70,31 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 | `FIND_PERMISSIONS_BY_GROUP` | Message | `{ groupId, entityName? }` | `Permission[]` |
 | `FIND_BULK_PERMISSIONS_MULTI` | Message | `{ groupIds, entityNames }` | `BulkPermissionsDTO` |
 | `FIND_PAGE_PERMISSIONS_BY_GROUP` | Message | `{ groupId }` | `PagePermission[]` |
+| `GET_MY_PERMISSIONS` | Message | `{ groupIds }` | permissions object |
+| `CHECK_OPERATION_PERMISSION` | Message | `{ groupIds, operation }` | `{ allowed: boolean }` |
+
+## Tenants Service
+
+| Pattern | Type | Payload | Response |
+|---------|------|---------|----------|
+| `TENANT_EXISTS` | Message | `string` | `boolean` |
+| `FIND_TENANT_BY_ID` | Message | `string` | `Tenant \| null` |
+| `FIND_TENANT_BY_SLUG` | Message | `string` | `Tenant \| null` |
+| `RESOLVE_TENANT_BY_SLUG` | Message | `string` | `Tenant \| null` |
+| `CHECK_SLUG_AVAILABILITY` | Message | `string` | `{ valid, error? }` |
+| `SIGNUP_TENANT` | Message | `SignupTenantRpcDto` | `{ tenantId }` |
+| `GET_TENANT_STATUS` | Message | `{ id }` | `{ status, loginUrl?, error? }` |
+| `BOOTSTRAP_TENANT` | Message | `BootstrapTenantRpcDto` | `{ success, tenantId, skipped? }` |
+| `CHECK_PLATFORM_ADMIN` | Message | `{ email }` | `{ isPlatformAdmin }` |
+| `LOGIN_PLATFORM_ADMIN` | Message | `LoginPlatformAdminRpcDto` | admin record or `null` |
+| `SEED_PLATFORM_ADMIN` | Message | `{ email, password, name, surname }` | `{ success, skipped? }` |
+| `VERIFY_IDENTITY_PASSWORD` | Message | `VerifyIdentityPasswordRpcDto` | identity record |
+| `DISCOVER_TENANTS` | Message | `DiscoverTenantsRpcDto` | `{ found, memberships }` |
+| `SWITCH_TENANT` | Message | `{ email, tenantSlug }` | `{ userId, tenantSlug, tenantId }` |
+| `GET_IDENTITY_MEMBERSHIPS` | Message | `{ email }` | `{ memberships, isPlatformAdmin }` |
+| `UPDATE_IDENTITY_PASSWORD` | Message | `UpdateIdentityPasswordRpcDto` | `{ success }` |
+| `UPSERT_USER_IDENTITY` | Message | `UpsertUserIdentityRpcDto` | identity record |
+| `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
 
 ## GroupAssignments Service
 

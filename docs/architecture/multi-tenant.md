@@ -16,8 +16,25 @@ Cucu implements **physical database isolation** for multi-tenancy. Each tenant g
 | `TenantAwareClientsModule` | `@cucu/service-common` | Drop-in replacement for `ClientsModule.registerAsync()` with tenant injection via CLS |
 | `withTenantId()` | `@cucu/tenant-db` | Mixin — stamps `tenantId` on documents as defence-in-depth |
 
-::: info Migration Note
-The old `TenantContext` (static AsyncLocalStorage wrapper), `TenantInterceptor`, and `TenantGraphqlMiddleware` have been replaced by `nestjs-cls`-based equivalents. `TenantClsModule` configures `ClsMiddleware` for HTTP/GraphQL and `ClsInterceptor` for RPC, while `TenantClsInterceptor` handles RPC payload extraction and stripping. `TenantContextService` replaces the static `TenantContext` utility with a DI-integrated service.
+::: info Migration Complete — ClsService in All Contexts
+All 11 subgraph context files now inject `ClsService<TenantClsStore>` as the second constructor parameter:
+
+```typescript
+// Pattern used by all context files:
+@Injectable({ scope: Scope.REQUEST })
+export class XxxContext extends BaseSubgraphContext {
+  constructor(
+    @Optional() @Inject(REQUEST) req?: any,
+    @Optional() cls?: ClsService<TenantClsStore>,
+  ) {
+    super(req, cls);
+  }
+}
+```
+
+**Context files:** `GrantsContext`, `UsersContext`, `OrganizationContext`, `TenantsContext`, `ProjectsContext`, `MilestonesContext`, `HolidaysContext`, `GroupAssignmentsContext` (`GaContext`), `MilestoneToProjectContext` (`M2pContext`), `MilestoneToUserContext` (`M2uContext`), `ProjectAccessContext`.
+
+The old `TenantContext` (static AsyncLocalStorage wrapper), `TenantInterceptor`, and `TenantGraphqlMiddleware` have been fully replaced by `nestjs-cls`-based equivalents.
 :::
 
 ## Tenant Context Flow

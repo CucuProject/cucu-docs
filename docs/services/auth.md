@@ -111,7 +111,7 @@ TTL: 3600 seconds (1 hour)
 | `logout` | `input: LogoutInput!` | `Boolean!` | Revoke a single session by sessionId |
 | `revokeSession` | `input: RevokeSessionInput!` | `Boolean!` | Revoke a session. Scope: `self` requires own session |
 | `revokeUserSessions` | `userId: ID` | `Boolean!` | Revoke all active sessions for a user (nullable userId defaults to self) |
-| `changePassword` | `currentPassword: String!, newPassword: String!` | `Boolean!` | Change password, revoke all sessions, sync to platform DB |
+| `changePassword` | `input: ChangePasswordInput!` | `Boolean!` | Change password, revoke all sessions, sync to platform DB |
 
 ### ResolveField
 
@@ -216,6 +216,36 @@ Cache is invalidated when:
 - User is deleted (`revokeAllSessionsOfUser` calls `cacheManager.del`)
 - Password is changed (all sessions revoked + cache cleared)
 
+### Password Complexity Validation
+
+The `ChangePasswordInput` DTO enforces password complexity via `@IsStrongPassword()` from `@cucu/service-common/validators`:
+
+```typescript
+@InputType()
+export class ChangePasswordInput {
+  @IsNotEmpty()
+  @IsString()
+  currentPassword: string;
+
+  @IsNotEmpty()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  @IsStrongPassword()   // ← from @cucu/service-common
+  newPassword: string;
+}
+```
+
+**Complexity requirements** (enforced by `PASSWORD_COMPLEXITY_REGEX`):
+- At least one uppercase letter
+- At least one lowercase letter
+- At least one digit
+- At least one special character (`!@#$%^&*()_+-=[]{}|;:,.<>?`)
+
+::: info DEV_MODE bypass
+When `DEV_MODE=true`, password complexity validation is skipped to simplify development workflows.
+:::
+
 ### Password Change Flow
 
 1. `FIND_USER_WITH_PASSWORD` RPC → get current hash + email
@@ -224,6 +254,25 @@ Cache is invalidated when:
 4. `UPDATE_USER_PASSWORD` → update tenant DB (backward compat)
 5. `UPDATE_IDENTITY_PASSWORD` → update platform DB (source of truth)
 6. Revoke all active sessions → force re-login
+
+### RPC DTO Validation
+
+All RPC handlers use formal DTOs with `class-validator` decorators, validated by the global `ValidationPipe` (configured in `createSubgraphMicroservice`):
+
+| DTO | Pattern | Fields |
+|-----|---------|--------|
+| `CheckSessionRpcDto` | `CHECK_SESSION` | `sessionId` |
+| `RevokeSessionRpcDto` | `REVOKE_SESSION` | `sessionId, requestUserId, force` |
+| `LoginRpcDto` | `LOGIN` | `email, password, ip, deviceName, browserName, deviceFingerprint` |
+| `CreateAuthenticatedSessionRpcDto` | `CREATE_AUTHENTICATED_SESSION` | `userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint` |
+| `RefreshSessionRpcDto` | `REFRESH_SESSION` | `refreshToken` |
+| `SwitchSessionTenantRpcDto` | `SWITCH_SESSION_TENANT` | `sessionId, userId, tenantSlug, tenantId, email` |
+| `UserDeletedRpcDto` | `USER_DELETED` / `REVOKE_ALL_SESSIONS` | `userId` |
+| `VerifyFromTokenRpcDto` | `VERIFY_FROM_TOKEN` / `GET_ME` | `refreshToken` |
+| `RefreshFromTokenRpcDto` | `REFRESH_FROM_TOKEN` | `refreshToken, deviceFingerprint?, ip?` |
+| `SwitchFromTokenRpcDto` | `SWITCH_FROM_TOKEN` | `refreshToken, targetTenantSlug` |
+
+The `TenantClsInterceptor` strips `_tenantSlug` and `_internalSecret` from RPC payloads **before** `ValidationPipe` runs, so DTOs only declare business fields.
 
 ### Throttling
 

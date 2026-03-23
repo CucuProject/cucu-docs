@@ -254,6 +254,69 @@ Used by the Next.js middleware on every navigation to determine auth state.
 
 Used by the login flow: user enters email first, then selects tenant, then enters password.
 
+## Password Complexity
+
+Passwords are validated at multiple levels:
+
+1. **DTO validation** — `ChangePasswordInput` uses `@IsStrongPassword()` from `@cucu/service-common/validators`
+2. **Regex enforcement** — `PASSWORD_COMPLEXITY_REGEX` requires uppercase, lowercase, digit, and special character
+3. **Length bounds** — minimum 8, maximum 128 characters
+4. **DEV_MODE bypass** — when `DEV_MODE=true`, complexity validation is skipped
+
+The same regex and validation function are exported from `@cucu/service-common` so the frontend can enforce the same rules in form validation.
+
+## Tenant Signup Flow
+
+New tenants are created via the Gateway's `POST /tenants/signup` endpoint:
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend
+    participant GW as Gateway /tenants/signup
+    participant TS as Tenants Service
+    participant Prov as TenantProvisioningService
+    participant DB as MongoDB
+
+    FE->>GW: POST /tenants/signup {slug, name, ownerEmail, adminPassword, ...}
+    Note over GW: Rate limited (signup throttle)
+    GW->>TS: SIGNUP_TENANT RPC {slug, name, ownerEmail, adminPassword, adminName, adminSurname, plan}
+    
+    TS->>TS: checkSlugAvailability(slug)
+    Note over TS: Regex + blacklist + uniqueness check
+    TS->>DB: Insert tenant (status: 'provisioning')
+    
+    TS->>Prov: provision(tenantId, {slug, ownerEmail, adminPassword, ...})
+    Prov->>DB: Create indexes for all service DBs
+    Prov->>DB: Create user_identity with owner membership
+    Prov->>DB: Update tenant status → 'active'
+    
+    TS-->>GW: {tenantId}
+    GW-->>FE: {tenantId}
+    
+    Note over FE: Poll GET /tenants/status/:id until active
+```
+
+The signup flow validates slug availability (regex `/^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/`, blacklist of reserved slugs like `www`, `api`, `admin`, etc., and uniqueness check against existing tenants).
+
+## Me Endpoint (Orchestrator Pattern)
+
+`GET /auth/me` — `@Public()` — returns the current user's profile and permissions:
+
+```
+Gateway (thin proxy):
+1. Read refresh token from cookie
+2. Decode refresh token to extract tenantSlug
+3. TenantContextService.run(tenantSlug, () => GET_ME RPC)
+
+Auth Orchestrator:
+1. Verify JWT signature
+2. CHECK_SESSION (internal)
+3. GET_MY_PERMISSIONS RPC → Grants
+4. Return: { authenticated, user: { userId, email, tenantSlug, tenantId, groups }, permissions }
+```
+
+Used by Next.js RSC (React Server Components) layouts to load user state and permissions on initial page render.
+
 ## Password Change
 
 ```mermaid
@@ -293,5 +356,7 @@ Both the tenant DB and platform DB password hashes are updated. The platform DB 
 |----------|-------|--------|
 | `POST /auth/login` | 100 requests | 15 minutes |
 | `POST /auth/discover` | 10 requests | 1 minute |
+| `POST /tenants/signup` | Per-route (signup throttle) | Configured per-route |
+| `GET /tenants/check-slug/:slug` | Per-route (discover throttle) | Same as discover |
 | Auth service (global) | 5 requests | 15 minutes (per-IP, `AuthThrottlerGuard`) |
 | Gateway (global) | 60 requests | 1 minute |

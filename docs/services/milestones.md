@@ -119,3 +119,52 @@ Status is a numeric percentage (0-100). The `updateMilestoneStatus` mutation acc
 ### Color Assignment
 
 Milestones can have an optional hex color for UI display. If not provided during creation, one may be auto-assigned.
+
+## Date Architecture: Planned vs Actual
+
+Milestones use a **dual-date system** to track plan vs reality:
+
+| Field | Location | Purpose |
+|-------|----------|---------|
+| `plannedStartDate` | `Milestone.milestoneBasicData` | Baseline — the original plan |
+| `plannedEndDate` | `Milestone.milestoneBasicData` | Baseline — the original plan |
+| `startDate` | `MilestoneToProject` | Actual/operative — changes when Gantt bar is dragged |
+| `endDate` | `MilestoneToProject` | Actual/operative — changes when Gantt bar is dragged |
+
+**Lifecycle:**
+
+1. **DRAFT project** — Both planned and actual dates are freely editable. The wizard creates the milestone with `plannedStartDate`/`plannedEndDate`, then creates the M2P record with the same dates as `startDate`/`endDate`.
+2. **ACTIVE project** — Planned dates are **frozen** (read-only). Only M2P `startDate`/`endDate` can change via Gantt drag. This preserves the original baseline for variance analysis.
+3. **Variance** — The deviation between plan and reality is computed as: `M2P.startDate - Milestone.plannedStartDate`.
+
+> **Historical note:** `startDate`/`endDate` were originally on `MilestoneBasicData` but were removed in PR #218 (March 2026) to avoid data duplication. The M2P record is the single source of truth for operative dates.
+
+### Planned Dates Freeze Guard
+
+When updating a milestone, if the DTO contains `plannedStartDate` or `plannedEndDate`, the service checks via RPC whether any associated project is ACTIVE or ARCHIVED:
+
+```
+Milestones → M2P (HAS_ACTIVE_PROJECT_FOR_MILESTONE) → Projects (GET_PROJECTS_STATUS)
+```
+
+- Milestones service does **NOT** communicate directly with Projects — it always goes through M2P as intermediary.
+- If any associated project is ACTIVE or ARCHIVED → `BadRequestException`.
+- If all projects are DRAFT or no project is associated → update proceeds.
+
+## Locked Milestone (`isLocked`)
+
+When a milestone is locked:
+
+**Backend guards:**
+- `update()` — blocks ALL modifications except toggling `isLocked` itself. If `dto.isLocked` is defined, the guard is skipped (allows unlock). Otherwise, checks `isLocked` and throws `BadRequestException('Cannot modify a locked milestone. Unlock it first.')`.
+- `remove()` — blocks deletion with `BadRequestException('Cannot delete a locked milestone. Unlock it first.')`.
+
+**Frontend behavior (sidebar + drawer + context menu):**
+- Lock icon is always visible next to the milestone name (sidebar row + drawer).
+- Lock toggle button in sidebar is always visible and clickable.
+- Edit (pencil) and Delete (trash) icons are **visible but disabled** (`opacity: 0.25`, `cursor: not-allowed`) — NOT hidden.
+- Context menu: Edit and Delete entries are visible but disabled.
+- MilestoneDrawer: all pencils disabled, color picker not clickable, delete button disabled.
+- Gantt bar: not draggable, not resizable.
+
+**Design principle:** Disabled ≠ Hidden. The user should always see that actions exist but are blocked by the lock state. This communicates intent clearly.

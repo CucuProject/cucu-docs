@@ -119,6 +119,7 @@ class ProjectTemplatePhase {
 | `FIND_TEMPLATE_PHASES_BY_TEMPLATE_ID` | `string` | `ProjectTemplatePhase[]` | Get phases (bootstrap) |
 | `CREATE_PROJECT_TEMPLATE_PHASE` | `{templateId, name, orderIndex, ...}` | `ProjectTemplatePhase` | Create phase (bootstrap) |
 | `SEED_PROJECT_TEMPLATES` | — | `void` | Trigger template seeding (called by bootstrap) |
+| `GET_PROJECTS_STATUS` | `{ ids: string[] }` | `Array<{ projectId: string, status: string }>` | Batch status check (returns `NOT_FOUND` for missing IDs) |
 
 ### Outbound Events
 

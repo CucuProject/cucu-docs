@@ -69,6 +69,7 @@ class MilestoneToProject {
 | `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` | `string` | assignments |
 | `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_IDS` | `string[]` | assignments |
 | `CREATE_MILESTONE_TO_PROJECT` | `{milestoneId, projectId, startDate?, endDate?}` | assignment |
+| `HAS_ACTIVE_PROJECT_FOR_MILESTONE` | `{ milestoneId: string }` | `{ hasActive: boolean }` |
 
 ### EventPattern Handlers
 
@@ -95,3 +96,17 @@ When milestones or projects are updated with new assignment lists, the service p
 ### Date Override
 
 Each M2P record can have its own `startDate` and `endDate` that differ from the parent milestone's planned dates. This allows flexible scheduling when the same milestone participates in multiple projects with different timelines.
+
+### RPC: HAS_ACTIVE_PROJECT_FOR_MILESTONE
+
+Added to support the planned dates freeze guard in the Milestones service.
+
+| Pattern | Input | Output |
+|---------|-------|--------|
+| `HAS_ACTIVE_PROJECT_FOR_MILESTONE` | `{ milestoneId: string }` | `{ hasActive: boolean }` |
+
+**Logic:**
+1. Queries M2P records for the given `milestoneId`
+2. Extracts `projectId` from each record
+3. Calls `GET_PROJECTS_STATUS` on the Projects service with all project IDs
+4. Returns `{ hasActive: true }` if any project has status `ACTIVE` or `ARCHIVED`

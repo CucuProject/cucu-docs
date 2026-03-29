@@ -70,6 +70,9 @@ class MilestoneToProject {
 | `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_IDS` | `string[]` | assignments |
 | `CREATE_MILESTONE_TO_PROJECT` | `{milestoneId, projectId, startDate?, endDate?}` | assignment |
 | `HAS_ACTIVE_PROJECT_FOR_MILESTONE` | `{ milestoneId: string }` | `{ hasActive: boolean }` |
+| `HAS_ARCHIVED_PROJECT_FOR_MILESTONE` | `{ milestoneId: string }` | `{ hasArchived: boolean }` |
+| `GET_PROJECT_IDS_BY_MILESTONE_IDS` | `{ milestoneIds: string[] }` | `string[]` |
+| `GET_MILESTONE_IDS_BY_PROJECT_IDS` | `{ projectIds: string[] }` | `string[]` |
 
 ### EventPattern Handlers
 
@@ -110,3 +113,35 @@ Added to support the planned dates freeze guard in the Milestones service.
 2. Extracts `projectId` from each record
 3. Calls `GET_PROJECTS_STATUS` on the Projects service with all project IDs
 4. Returns `{ hasActive: true }` if any project has status `ACTIVE` or `ARCHIVED`
+
+### RPC: HAS_ARCHIVED_PROJECT_FOR_MILESTONE
+
+Added to support the ARCHIVED project guard in the Milestones service.
+
+| Pattern | Input | Output |
+|---------|-------|--------|
+| `HAS_ARCHIVED_PROJECT_FOR_MILESTONE` | `{ milestoneId: string }` | `{ hasArchived: boolean }` |
+
+**Logic:**
+1. Queries M2P records for the given `milestoneId`
+2. Extracts `projectId` from each record
+3. Calls `GET_PROJECTS_STATUS` on the Projects service
+4. Returns `{ hasArchived: true }` if any project has status `ARCHIVED`
+
+### RPC: GET_PROJECT_IDS_BY_MILESTONE_IDS / GET_MILESTONE_IDS_BY_PROJECT_IDS
+
+Added to support query access filtering in Milestones and MilestoneToUser.
+
+| Pattern | Input | Output | Purpose |
+|---------|-------|--------|---------|
+| `GET_PROJECT_IDS_BY_MILESTONE_IDS` | `{ milestoneIds: string[] }` | `string[]` | Return all distinct project IDs linked to the given milestones |
+| `GET_MILESTONE_IDS_BY_PROJECT_IDS` | `{ projectIds: string[] }` | `string[]` | Return all distinct milestone IDs linked to the given projects |
+
+## ARCHIVED Project Guard
+
+`createMilestoneToProject`, `updateMilestoneToProject`, and `removeMilestoneToProject` (and their batch variants) check whether the target project is ARCHIVED before executing:
+
+- If the project has status `ARCHIVED` → `BadRequestException`
+- Check is performed via `GET_PROJECTS_STATUS` on the Projects service
+
+This prevents any structural changes to milestone–project assignments when the project is archived.

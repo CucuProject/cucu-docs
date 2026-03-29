@@ -41,6 +41,7 @@ export default defineConfig({
             { text: 'Multi-Tenant', link: '/architecture/multi-tenant' },
             { text: 'Permission System', link: '/architecture/permissions' },
             { text: 'Service Startup', link: '/architecture/startup' },
+            { text: 'Project Access Control', link: '/architecture/project-access-control' },
           ]
         },
         {

@@ -115,7 +115,7 @@ The returned level is the maximum across all matching sources (owner > editor+ >
 
 `transferOwnership` moves the `OWNER` role to a new user:
 - Caller must be a supervisor of the current owner, or a SUPERADMIN
-- The previous owner's record is downgraded to `EDITOR`
+- The previous owner's record is downgraded to `EDITOR_PLUS` (not `EDITOR` — preserves share capability)
 - The new owner's record is created or updated to `OWNER`
 - The Projects service is notified via `UPDATE_PROJECT_CREATED_BY`
 
@@ -124,6 +124,17 @@ The returned level is the maximum across all matching sources (owner > editor+ >
 - Caller must be the project owner, an `editor+`, or a supervisor of the owner
 
 `getProjectShares` lists all explicit `ProjectAccess` records for a project.
+
+### Authorization Assertions
+
+Two internal assertion methods enforce who can share and who can transfer:
+
+| Assertion | Allowed callers |
+|-----------|----------------|
+| `assertCanShare` | Owner, `editor+`, supervisor chain of the owner, SUPERADMIN |
+| `assertCanTransferOwnership` | Supervisor chain of the owner, SUPERADMIN **only** |
+
+> **Note:** The project owner cannot transfer ownership to someone else directly — a supervisor or SUPERADMIN must perform the transfer.
 
 ### Implicit Viewer via M2U
 

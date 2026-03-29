@@ -9,19 +9,19 @@ Each user's effective access level on a project is one of:
 | Level | Value | Priority | Capabilities |
 |-------|-------|----------|-------------|
 | `owner` | `OWNER` | 4 (highest) | View, edit, share |
-| `editor+` | `EDITOR_PLUS` | 3 | View, edit, share |
+| `collaborator` | `COLLABORATOR` | 3 | View, edit, share |
 | `editor` | `EDITOR` | 2 | View, edit |
 | `viewer` | `VIEWER` | 1 (lowest) | View only |
 | (none) | `null` | — | No access |
 
-> **ROLE_PRIORITY:** `viewer(1) < editor(2) < editor+(3) < owner(4)`
+> **ROLE_PRIORITY:** `viewer(1) < editor(2) < collaborator(3) < owner(4)`
 
 ### Capability Matrix
 
 | Role / Source | View | Edit | Share | Transfer Ownership |
 |---------------|------|------|-------|--------------------|
 | `owner` | ✅ | ✅ | ✅ | ❌ |
-| `editor+` | ✅ | ✅ | ✅ | ❌ |
+| `collaborator` | ✅ | ✅ | ✅ | ❌ |
 | `editor` | ✅ | ✅ | ❌ | ❌ |
 | `viewer` (explicit) | ✅ | ❌ | ❌ | ❌ |
 | `viewer` (implicit M2U) | ✅ | ❌ | ❌ | ❌ |
@@ -30,19 +30,19 @@ Each user's effective access level on a project is one of:
 
 > **Note:** Only supervisor chain and SUPERADMIN can transfer ownership. The project owner cannot transfer ownership themselves — a supervisor must do it.
 
-> **Note:** The `editor+` role may be renamed in a future iteration (naming brainstorm in progress).
+> **Note:** The `collaborator` role may be renamed in a future iteration (naming brainstorm in progress).
 
 ## Access Sources and Priority
 
 A user can gain access to a project through four sources. The effective level is the **highest** across all matching sources:
 
 ```
-owner > editor+ > editor > viewer
+owner > collaborator > editor > viewer
 ```
 
 | Source | Level granted | Notes |
 |--------|--------------|-------|
-| Explicit DB record (`ProjectAccess`) | As stored (`owner` / `editor+` / `editor` / `viewer`) | Created via share or auto-created at project creation |
+| Explicit DB record (`ProjectAccess`) | As stored (`owner` / `collaborator` / `editor` / `viewer`) | Created via share or auto-created at project creation |
 | Supervisor chain of project owner | `editor` | Direct or indirect supervisor of the owner |
 | M2U implicit | `viewer` | User is allocated to a milestone of the project (no DB record) |
 | SUPERADMIN group | Unrestricted | Bypasses all access checks |
@@ -53,7 +53,7 @@ owner > editor+ > editor > viewer
 
 1. **Owner** — the `createdBy` field on the project, set automatically at creation. An `OWNER` record is also created in `ProjectAccess`.
 2. **Supervisor chain** — the system walks up `supervisorIds` of the project owner until the root. All supervisors in the chain gain `editor`-level access plus share and transfer-ownership capabilities.
-3. **Explicit share** — a `ProjectAccess` record with role `editor+` / `editor` / `viewer`, created via the `shareProject` mutation.
+3. **Explicit share** — a `ProjectAccess` record with role `collaborator` / `editor` / `viewer`, created via the `shareProject` mutation.
 4. **Implicit viewer (M2U)** — the user has a `MilestoneToUser` record on any milestone of the project. Resolved at runtime — no `ProjectAccess` record is created.
 
 ### Access Rule
@@ -91,9 +91,9 @@ The Share API allows users with sufficient access to grant access to others.
 
 | Mutation | Input | Who can call | Notes |
 |----------|-------|-------------|-------|
-| `shareProject` | `ShareProjectInput` | Owner, `editor+`, supervisor of owner, or SUPERADMIN | Creates or updates a `ProjectAccess` record for the target user |
-| `transferOwnership` | `TransferOwnershipInput` | Supervisor of current owner, or SUPERADMIN | Previous owner becomes `EDITOR_PLUS` (retains share capability); new owner becomes `OWNER`; `UPDATE_PROJECT_CREATED_BY` sent to Projects |
-| `revokeAccess` | `RevokeAccessInput` | Owner, `editor+`, supervisor of owner, or SUPERADMIN | Cannot revoke the owner record |
+| `shareProject` | `ShareProjectInput` | Owner, `collaborator`, supervisor of owner, or SUPERADMIN | Creates or updates a `ProjectAccess` record for the target user |
+| `transferOwnership` | `TransferOwnershipInput` | Supervisor of current owner, or SUPERADMIN | Previous owner becomes `COLLABORATOR` (retains share capability); new owner becomes `OWNER`; `UPDATE_PROJECT_CREATED_BY` sent to Projects |
+| `revokeAccess` | `RevokeAccessInput` | Owner, `collaborator`, supervisor of owner, or SUPERADMIN | Cannot revoke the owner record |
 | `getProjectShares` | `projectId` | — (query, access-checked) | Returns all explicit `ProjectAccess` records for the project |
 
 ## Implicit Access via M2U
@@ -168,8 +168,8 @@ Access and visibility are intentionally kept intact during archiving so that his
 | SuperAdmin = SUPERADMIN group in grants service | Not a flag on the user entity — reuses existing grants/group infrastructure |
 | M2U implicit viewer = runtime lookup | No denormalization — avoids sync issues when M2U records change |
 | `createdBy` nullable on Project | Backward compatibility with pre-existing data in dev/staging environments |
-| Previous owner → `editor+` on transfer | Preserves the ability to share (an `editor` could not re-share the project) |
-| `editor+` naming | Temporary — may be renamed in a future iteration |
+| Previous owner → `collaborator` on transfer | Preserves the ability to share (an `editor` could not re-share the project) |
+| `collaborator` naming | Temporary — may be renamed in a future iteration |
 
 ## Implementation Phases
 

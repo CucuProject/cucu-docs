@@ -9,7 +9,7 @@ Not every user can share a project. The ability to share is determined by your e
 | Your role | Can share? | Can transfer ownership? |
 |-----------|-----------|------------------------|
 | Owner | ✅ | ❌ |
-| `editor+` | ✅ | ❌ |
+| `collaborator` | ✅ | ❌ |
 | `editor` | ❌ | ❌ |
 | `viewer` | ❌ | ❌ |
 | Supervisor of owner | ✅ | ✅ |
@@ -23,7 +23,7 @@ Not every user can share a project. The ability to share is determined by your e
 
 1. Open the project
 2. Click the **Share** button
-3. In the share modal, select a user and assign a role (`viewer`, `editor`, or `editor+`)
+3. In the share modal, select a user and assign a role (`viewer`, `editor`, or `collaborator`)
 4. Confirm — the user immediately gains access
 
 ### What Happens Behind the Scenes
@@ -42,7 +42,7 @@ If the target user already has an explicit access record, it is updated to the n
 |------|--------------------------|
 | `viewer` | View the project and its data |
 | `editor` | View + edit the project |
-| `editor+` | View + edit + share with others |
+| `collaborator` | View + edit + share with others |
 
 > You cannot assign `owner` via sharing — ownership is set at creation or via transfer.
 
@@ -59,7 +59,7 @@ If the target user already has an explicit access record, it is updated to the n
 
 - You **cannot revoke the owner's record** — use Transfer Ownership instead
 - Revoking explicit access does **not** remove implicit access: if the user is allocated to a milestone (M2U) in the project, they retain `viewer` access. The M2U allocation must be removed separately.
-- Caller must be the owner, `editor+`, supervisor of the owner, or SUPERADMIN
+- Caller must be the owner, `collaborator`, supervisor of the owner, or SUPERADMIN
 
 ```
 revokeAccess(input: RevokeAccessInput!)
@@ -83,12 +83,12 @@ revokeAccess(input: RevokeAccessInput!)
 ```
 transferOwnership(input: TransferOwnershipInput!)
   → assertCanTransferOwnership(caller, project)
-  → previous owner's record → EDITOR_PLUS
+  → previous owner's record → COLLABORATOR
   → new owner's record → OWNER
   → emit UPDATE_PROJECT_CREATED_BY to Projects service
 ```
 
-The previous owner is downgraded to `editor+` (not `editor`) so they retain the ability to share the project with others.
+The previous owner is downgraded to `collaborator` (not `editor`) so they retain the ability to share the project with others.
 
 ### Who Can Transfer
 
@@ -107,7 +107,7 @@ When the system checks a user's access to a project, it evaluates all sources an
 ┌──────────────────────────┐
 │ GET_PROJECT_ACCESS_LEVEL │
 ├──────────────────────────┤
-│ 1. Explicit DB record    │ → role as stored (owner/editor+/editor/viewer)
+│ 1. Explicit DB record    │ → role as stored (owner/collaborator/editor/viewer)
 │ 2. Supervisor chain      │ → editor (+ share/transfer capabilities)
 │ 3. M2U implicit          │ → viewer
 │ 4. SUPERADMIN group      │ → unrestricted
@@ -122,7 +122,7 @@ When the system checks a user's access to a project, it evaluates all sources an
 
 ### "I shared a project but the user can't edit"
 
-Check the role you assigned. `viewer` grants read-only access. Change the share to `editor` or `editor+`.
+Check the role you assigned. `viewer` grants read-only access. Change the share to `editor` or `collaborator`.
 
 ### "I revoked access but the user can still see the project"
 
@@ -130,8 +130,8 @@ The user likely has implicit access via M2U — they are allocated to a mileston
 
 ### "I want to transfer ownership but the button is disabled"
 
-Only supervisors of the current owner and SUPERADMINs can transfer. If you are the owner or an `editor+`, you cannot transfer — ask a supervisor.
+Only supervisors of the current owner and SUPERADMINs can transfer. If you are the owner or an `collaborator`, you cannot transfer — ask a supervisor.
 
 ### "The previous owner lost share capability after transfer"
 
-This should not happen — the previous owner is downgraded to `editor+`, which retains share capability. If they were downgraded to `editor`, this is a bug.
+This should not happen — the previous owner is downgraded to `collaborator`, which retains share capability. If they were downgraded to `editor`, this is a bug.

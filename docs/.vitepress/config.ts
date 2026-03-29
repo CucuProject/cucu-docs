@@ -86,6 +86,7 @@ export default defineConfig({
             { text: 'Add New Permission', link: '/guides/add-new-permission' },
             { text: 'Debugging', link: '/guides/debugging' },
             { text: 'Milestone Lifecycle', link: '/guides/milestone-lifecycle' },
+            { text: 'Apollo Fetch Policy', link: '/guides/fetch-policy' },
           ]
         },
         {

@@ -165,6 +165,9 @@ All RPC handlers use formal DTOs with `class-validator` decorators, validated by
 | `UPDATE_USER_PASSWORD` | `UpdateUserPasswordRpcDto` | void | Update password hash (pre-hashed) |
 | `FIND_GROUPIDS_BY_USERID` | `FindGroupIdsRpcDto` | `{groupIds: string[]}` | Get group IDs for a user |
 | `GET_ORG_ENTITY_USAGE_COUNT` | `OrgEntityUsageCountRpcDto` | `number` | Count users referencing a lookup entity |
+| `GET_SUPERVISOR_CHAIN` | `{userId: string}` | `string[]` | All supervisor IDs going up the hierarchy from `userId` (cycle-safe — stops if a repeated node is encountered) |
+| `GET_ALL_SUBORDINATE_IDS` | `{userId: string}` | `string[]` | All subordinate IDs going down the hierarchy from `userId` (cycle-safe) |
+| `GET_USER_SUPERVISOR_IDS` | `{userId: string}` | `string[]` | Direct supervisor IDs only (one level up, equivalent to `additionalFieldsData.supervisorIds`) |
 
 ### EventPattern Handlers
 

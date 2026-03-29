@@ -29,6 +29,7 @@ class Project {
     excludeWeekends: boolean     // default: false
     countryCode?: string         // ISO 3166-1 alpha-2 for holiday calendar lookup
   }
+  createdBy?: string             // userId of the creator — set automatically on creation, nullable for pre-existing data
   milestones?: MilestoneToProject[]  // Federation
   tenantId?: string
   deletedAt?: Date
@@ -120,6 +121,9 @@ class ProjectTemplatePhase {
 | `CREATE_PROJECT_TEMPLATE_PHASE` | `{templateId, name, orderIndex, ...}` | `ProjectTemplatePhase` | Create phase (bootstrap) |
 | `SEED_PROJECT_TEMPLATES` | — | `void` | Trigger template seeding (called by bootstrap) |
 | `GET_PROJECTS_STATUS` | `{ ids: string[] }` | `Array<{ projectId: string, status: string }>` | Batch status check (returns `NOT_FOUND` for missing IDs) |
+| `GET_PROJECT_CREATED_BY` | `{projectId: string}` | `{createdBy: string\|null}` | Get the userId of the project creator |
+| `GET_PROJECT_IDS_BY_CREATOR` | `{userIds: string[]}` | `string[]` | Get all project IDs where `createdBy` is in the given user list |
+| `UPDATE_PROJECT_CREATED_BY` | `{projectId: string, newCreatedBy: string}` | `void` | Update the `createdBy` field — called by project-access during ownership transfer |
 
 ### Outbound Events
 
@@ -128,6 +132,31 @@ class ProjectTemplatePhase {
 | MilestoneToProject | `PROJECT_CREATED` | After project creation |
 | MilestoneToProject | `PROJECT_UPDATED` | After project update |
 | MilestoneToProject | `PROJECT_DELETED` | After project deletion |
+
+## Access Control
+
+### On Project Creation
+
+When a project is created, the Projects service emits a `PROJECT_OWNER_CREATED` event to the ProjectAccess service with `{projectId, userId}`. ProjectAccess automatically creates an `OWNER` record for the creator. This means `createdBy` and the owner in project-access always start as the same user.
+
+### Query Filtering
+
+- **`findAllProjects`** — filters the result to only include projects the requesting user can access. Internally calls `GET_ALL_ACCESSIBLE_PROJECT_IDS` on the ProjectAccess service.
+- **`findOneProject`** — after fetching the project, checks the user's access level via `GET_PROJECT_ACCESS_LEVEL`. Throws `ForbiddenException` if the level is `null`.
+
+### Write Guards
+
+- **`update()`** — requires at least `editor` level on the project. Users with only `viewer` access receive `ForbiddenException`.
+- **`remove()`** — requires at least `editor` level on the project.
+
+## ARCHIVED Project Rules
+
+When a project's status is `ARCHIVED`:
+
+- **`update()`** — blocked with `BadRequestException` unless the update is a status-only change back to `ACTIVE`. All other field changes are rejected.
+- **`remove()`** — blocked with `BadRequestException`. An ARCHIVED project cannot be deleted.
+
+These guards are enforced in the Projects service resolver before any DB write.
 
 ## Template Seeding
 

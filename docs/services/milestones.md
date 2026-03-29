@@ -120,6 +120,26 @@ Status is a numeric percentage (0-100). The `updateMilestoneStatus` mutation acc
 
 Milestones can have an optional hex color for UI display. If not provided during creation, one may be auto-assigned.
 
+## ARCHIVED Project Guard
+
+When a milestone belongs to a project with status `ARCHIVED`:
+
+- **`update()`** — blocked with `BadRequestException` unless the update only toggles `isLocked`. The lock toggle is always allowed even on ARCHIVED projects.
+- **`remove()`** — blocked with `BadRequestException`. A milestone linked to an ARCHIVED project cannot be deleted.
+
+The check is performed via `HAS_ARCHIVED_PROJECT_FOR_MILESTONE` on the MilestoneToProject service, which in turn checks project statuses via `GET_PROJECTS_STATUS` on the Projects service.
+
+> Note: a milestone may be linked to multiple projects. The guard triggers if **any** linked project is ARCHIVED.
+
+## Query Access Filtering
+
+Access filtering is applied at the query level to ensure users only see milestones they have access to:
+
+- **`findAllMilestones`** — calls `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` on ProjectAccess to get the user's accessible project IDs (safe, no M2U circular dependency), then calls `GET_MILESTONE_IDS_BY_PROJECT_IDS` on M2P to get the corresponding milestone IDs. Only milestones within that set are returned.
+- **`findById`** (`findOneMilestone`) — fetches the milestone, then checks if it belongs to an accessible project via `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` + M2P. Throws `ForbiddenException` if the user cannot access any project the milestone belongs to.
+
+> `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` (not `GET_ALL`) is used here to avoid circular calls: M2U calling back into M2U via M2U implicit access resolution.
+
 ## Date Architecture: Planned vs Actual
 
 Milestones use a **dual-date system** to track plan vs reality:

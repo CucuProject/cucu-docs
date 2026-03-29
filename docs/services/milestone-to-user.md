@@ -101,6 +101,8 @@ class ResourceDailyAllocation {
 |---------|-------|--------|---------|
 | `FIND_MILESTONE_TO_USER_BY_USER_ID` | `string` | `{_id}[]` | User's milestone assignments |
 | `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | `string` | `{_id}[]` | Milestone's user assignments |
+| `HAS_M2U_FOR_USER_IN_PROJECT` | `{userId: string, projectId: string}` | `boolean` | True if the user has any M2U record for a milestone linked to the project — used by ProjectAccess for implicit viewer resolution |
+| `GET_MILESTONE_IDS_BY_USER` | `{userId: string}` | `string[]` | All milestone IDs the user is assigned to (any M2U record) |
 
 ### EventPattern Handlers
 
@@ -130,3 +132,34 @@ The draft slot concept enables resource planning before people are assigned:
 
 - **Shift**: moves all allocations for a set of M2U records by N days (positive or negative)
 - **Rescale**: multiplies all allocation hours by a factor (e.g., 0.5 for half-time)
+
+## ARCHIVED Project Guard
+
+All 12 write operations are blocked when the milestone's associated project is ARCHIVED:
+
+**Blocked mutations:**
+- `createMilestoneToUser`, `updateMilestoneToUser`, `removeMilestoneToUser`
+- `createAssignmentsForUser`, `updateAssignmentsForUser`, `deleteAssignmentsForUser`
+- `createMilestoneToUserForMilestone`, `updateMilestoneToUserForMilestone`, `deleteMilestoneToUserForMilestone`
+- `upsertResourceDailyAllocation`, `bulkUpsertResourceDailyAllocations`, `deleteAllAllocationsByM2U`
+
+**Check flow:**
+1. Determine the project(s) for the affected milestone via `GET_PROJECT_IDS_BY_MILESTONE_IDS` (M2P)
+2. Fetch their statuses via `GET_PROJECTS_STATUS` (Projects)
+3. If any is `ARCHIVED` → `BadRequestException`
+
+> `shiftAllocations` and `rescaleAllocations` are not blocked (they operate on already-existing allocations and do not structurally change assignments).
+
+## Query Access Filtering
+
+Read operations are filtered to only return records the requesting user has access to:
+
+| Query | Filter mechanism |
+|-------|-----------------|
+| `findAllMilestoneToUser` | Filters to milestones in accessible projects (via `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` + `GET_MILESTONE_IDS_BY_PROJECT_IDS`) |
+| `findMilestoneToUserByUserId` | Same project-access filter applied |
+| `findMilestoneToUserByMilestoneId` | Checks project access for the milestone's project post-fetch |
+| `getMilestoneToUser` | Checks project access for the record's milestone post-fetch |
+| `findAllResourceDailyAllocations` | Filters underlying M2U records by accessible milestones |
+
+`GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` is used (not `GET_ALL`) to avoid a circular call: M2U → ProjectAccess → M2U implicit → M2U.

@@ -2,13 +2,23 @@
 
 The Cucu platform is a **multi-tenant, distributed microservices architecture** built on NestJS with Apollo Federation 2. It implements a project management and resource allocation system with fine-grained permission control and complete tenant isolation at the database level.
 
+## Major Phases Completed
+
+| Phase | Date | Scope |
+|-------|------|-------|
+| **Phase 1: Multi-Tenant** | 15 Mar 2026 | Physical database isolation (database-per-tenant), TenantConnectionManager, The Wall whitelist, withTenantId() mixin |
+| **Phase 2: Universal Auth** | 16 Mar 2026 | Atlassian-style login (email → discover tenants → select → password), tenant switch without re-login, signup multi-tenant, FE middleware + TenantProvider |
+| **Phase 3: Security Audit** | 23 Mar 2026 | 7 findings fixed (F-031 to F-045), 239 new tests → ~980 total, RpcInternalGuard, MongoDB credential isolation, timing-safe verification, Gateway endpoint consolidation |
+| **Phase 3.5: Service-Common Refactor** | 22 Mar 2026 | 9 sub-path exports, all tsconfig migrated to `moduleResolution: "node16"` |
+| **Phase 4: nestjs-cls Migration** | 22 Mar 2026 | Root cause fix for Apollo Federation context, replaced raw AsyncLocalStorage with nestjs-cls, all 11 subgraph contexts updated |
+
 ## Design Principles
 
-1. **Physical Database Isolation** — each tenant gets a separate MongoDB database per service (e.g., `users_acme`, `grants_acme`), not just a filter column
-2. **Single Entry Point** — all client traffic flows through the Gateway, which validates JWT tokens and forwards signed headers to subgraphs
-3. **Federation over Monolith** — GraphQL schema is distributed across services via Apollo Federation 2; each service owns its domain entities
-4. **Event-Driven Side Effects** — state changes propagate via Redis pub/sub events (fire-and-forget), while queries use request-response RPC
-5. **Permission as Data** — operation-level, field-level, and page-level permissions are stored in the Grants service and enforced at every subgraph
+1. **Physical Database Isolation** — each tenant gets a separate MongoDB database per service (e.g., `users_acme`, `grants_acme`), not just a filter column. Implemented in Phase 1 with `TenantConnectionManager` (max 200 virtual connections, 15min idle timeout).
+2. **Single Entry Point** — all client traffic flows through the Gateway, which validates JWT tokens and forwards HMAC-signed headers to subgraphs. HTTP endpoints consolidated in Phase 3.
+3. **Federation over Monolith** — GraphQL schema is distributed across services via Apollo Federation 2; each service owns its domain entities. Fixed in Phase 4 via nestjs-cls to properly handle context across federation boundaries.
+4. **Event-Driven Side Effects** — state changes propagate via Redis pub/sub events (fire-and-forget), while queries use request-response RPC. RPC calls are now authenticated via HMAC + `_internalSecret` (Phase 3, F-031).
+5. **Permission as Data** — operation-level, field-level, and page-level permissions are stored in the Grants service and enforced at every subgraph. Protected operations require RPC auth (Phase 3).
 
 ## Service Inventory
 

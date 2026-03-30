@@ -20,7 +20,7 @@ class ProjectAccess {
   _id: string
   projectId: string            // required
   userId: string               // required
-  role: ProjectAccessRole      // OWNER | EDITOR_PLUS | EDITOR | VIEWER
+  role: ProjectAccessRole      // OWNER | COLLABORATOR | EDITOR | VIEWER
   tenantId?: string
 }
 
@@ -32,7 +32,7 @@ class ProjectAccess {
 | Value | String | Capabilities |
 |-------|--------|-------------|
 | `OWNER` | `owner` | Full control — view, edit, share, transfer ownership |
-| `EDITOR_PLUS` | `editor+` | View + edit + share with others |
+| `COLLABORATOR` | `collaborator` | View + edit + share with others |
 | `EDITOR` | `editor` | View + edit |
 | `VIEWER` | `viewer` | View only |
 
@@ -42,7 +42,7 @@ A user may gain access to a project through multiple sources. The effective leve
 
 | Source | Effective Level | Notes |
 |--------|----------------|-------|
-| Explicit DB record | As stored (`owner`/`editor+`/`editor`/`viewer`) | Created via share or auto-created at project creation |
+| Explicit DB record | As stored (`owner`/`collaborator`/`editor`/`viewer`) | Created via share or auto-created at project creation |
 | Supervisor chain | `editor` | If the user is a supervisor (direct or indirect) of the project owner |
 | M2U implicit | `viewer` | If the user is allocated to a milestone linked to the project (no DB record needed) |
 | SUPERADMIN group | Full access | Members of the SUPERADMIN group bypass all access checks |
@@ -63,9 +63,9 @@ A user may gain access to a project through multiple sources. The effective leve
 
 | Mutation | Args | Return | Who Can Call |
 |----------|------|--------|-------------|
-| `shareProject` | `input: ShareProjectInput!` | `ProjectAccess!` | Owner, `editor+`, or supervisor of owner |
+| `shareProject` | `input: ShareProjectInput!` | `ProjectAccess!` | Owner, `collaborator`, or supervisor of owner |
 | `transferOwnership` | `input: TransferOwnershipInput!` | `ProjectAccess!` | Supervisor of current owner, or SUPERADMIN |
-| `revokeAccess` | `input: RevokeAccessInput!` | `Boolean!` | Owner, `editor+`, or supervisor of owner. Cannot revoke the owner record. |
+| `revokeAccess` | `input: RevokeAccessInput!` | `Boolean!` | Owner, `collaborator`, or supervisor of owner. Cannot revoke the owner record. |
 
 ### ResolveField
 
@@ -80,7 +80,7 @@ A user may gain access to a project through multiple sources. The effective leve
 
 | Pattern | Input | Output | Purpose |
 |---------|-------|--------|---------|
-| `GET_PROJECT_ACCESS_LEVEL` | `{projectId: string, userId: string}` | `{level: 'owner'\|'editor+'\|'editor'\|'viewer'\|null}` | Effective access level for a user on a project (all sources combined) |
+| `GET_PROJECT_ACCESS_LEVEL` | `{projectId: string, userId: string}` | `{level: 'owner'\|'collaborator'\|'editor'\|'viewer'\|null}` | Effective access level for a user on a project (all sources combined) |
 | `GET_ALL_ACCESSIBLE_PROJECT_IDS` | `{userId: string}` | `{projectIds: string[], isUnrestricted: boolean}` | All project IDs the user can access (explicit + supervisor + M2U). `isUnrestricted: true` for SUPERADMIN |
 | `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | `{userId: string}` | `{projectIds: string[], isUnrestricted: boolean}` | Only explicit DB records + supervisor chain — **no M2U lookup** (see circular dependency note) |
 | `HAS_PROJECT_ACCESS` | `{userId: string, projectId: string}` | `boolean` | Quick existence check (any access level) |
@@ -104,26 +104,37 @@ When `GET_PROJECT_ACCESS_LEVEL` is called, the service resolves the level across
 3. **M2U implicit** — check if the user has any M2U record for milestones linked to this project (via `HAS_M2U_FOR_USER_IN_PROJECT`). If yes → `viewer` level
 4. **SUPERADMIN** — if the user is in the SUPERADMIN group → unrestricted
 
-The returned level is the maximum across all matching sources (owner > editor+ > editor > viewer).
+The returned level is the maximum across all matching sources (owner > collaborator > editor > viewer).
 
 ### Share API
 
 `shareProject` creates or updates a `ProjectAccess` record for the target user:
-- Caller must be the project owner, an `editor+`, or a supervisor of the owner
+- Caller must be the project owner, an `collaborator`, or a supervisor of the owner
 - Cannot downgrade the owner's record via this mutation (use `transferOwnership` instead)
 - If a record already exists for the target user, it is updated
 
 `transferOwnership` moves the `OWNER` role to a new user:
 - Caller must be a supervisor of the current owner, or a SUPERADMIN
-- The previous owner's record is downgraded to `EDITOR`
+- The previous owner's record is downgraded to `COLLABORATOR` (not `EDITOR` — preserves share capability)
 - The new owner's record is created or updated to `OWNER`
 - The Projects service is notified via `UPDATE_PROJECT_CREATED_BY`
 
 `revokeAccess` removes a `ProjectAccess` record:
 - Cannot revoke the project's owner record (returns error)
-- Caller must be the project owner, an `editor+`, or a supervisor of the owner
+- Caller must be the project owner, an `collaborator`, or a supervisor of the owner
 
 `getProjectShares` lists all explicit `ProjectAccess` records for a project.
+
+### Authorization Assertions
+
+Two internal assertion methods enforce who can share and who can transfer:
+
+| Assertion | Allowed callers |
+|-----------|----------------|
+| `assertCanShare` | Owner, `collaborator`, supervisor chain of the owner, SUPERADMIN |
+| `assertCanTransferOwnership` | Supervisor chain of the owner, SUPERADMIN **only** |
+
+> **Note:** The project owner cannot transfer ownership to someone else directly — a supervisor or SUPERADMIN must perform the transfer.
 
 ### Implicit Viewer via M2U
 

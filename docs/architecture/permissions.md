@@ -37,10 +37,12 @@ OperationPermission {
 **Enforced by**: `OperationGuard` (registered as `APP_GUARD` on every subgraph)
 
 **Logic**:
-1. RPC calls bypass (service-to-service trust)
+1. RPC calls: verify the user has groups (is authenticated). Individual RPC handlers handle fine-grained auth.
 2. Internal federation calls without user context bypass
 3. Extract operation name from GraphQL AST (`info.operation.selectionSet`)
 4. Call `permCache.ensureOpAllowed(opName, userGroups)` → throws `ForbiddenException` if denied
+
+**Note on RPC:** The OperationGuard does NOT check a specific `__rpc__` operation. Instead, for authenticated RPC calls (user has groups), it allows the call through. The service's own handlers are responsible for authorization.
 
 ### Layer 2: Field Permissions (`Permission`)
 
@@ -153,9 +155,13 @@ The `PermissionsCacheService` resolves user groups from multiple sources (in ord
 1. **Explicit groups** passed by the resolver
 2. **`x-user-groups` header** (set by Gateway, verified via HMAC using `verifyGatewaySignature`)
 3. **JWT `groups` claim** (decoded from Bearer token, verified via `verifyFederationJwt` for federation calls)
-4. **`INTERNAL_CALL`** (for internal federation calls without user context)
+4. **CLS context** (for RPC calls — reads `cls.get('userGroups')` as fallback when no HTTP headers are available)
+5. **`INTERNAL_CALL`** (for internal federation calls without user context)
+
+**Important:** The CLS fallback (step 4) is critical for RPC flows. When a service calls another service via Redis RPC, there are no HTTP headers. The `TenantClsInterceptor` sets `userGroups` in CLS from the RPC payload, and `resolveGroups()` reads it as fallback.
 
 See [Security](/shared/security.md) for details on header and JWT verification.
+See [Communication](/architecture/communication.md) for CLS propagation in RPC flows.
 
 ## Scope Enforcement
 

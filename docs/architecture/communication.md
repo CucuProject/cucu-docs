@@ -310,6 +310,51 @@ The `TenantClsInterceptor` strips transport metadata (`_tenantSlug`, `_tenantId`
 Guard lifecycle: RpcInternalGuard → TenantClsInterceptor → ValidationPipe → Handler
 ```
 
+## CLS (Continuation Local Storage) Context Propagation
+
+User and tenant context is propagated via `nestjs-cls` (AsyncLocalStorage) in both HTTP and RPC flows.
+
+### HTTP Flow
+
+The `ClsMiddleware` (configured in `TenantClsModule`) runs on every HTTP request and extracts context from headers:
+
+```typescript
+setup: (cls, req) => {
+  cls.set('tenantSlug', req.headers['x-tenant-slug']);
+  cls.set('userId', req.headers['x-user-id']);
+  cls.set('userGroups', req.headers['x-user-groups']?.split(','));
+}
+```
+
+### RPC Flow
+
+The `TenantClsInterceptor` handles RPC calls:
+
+1. **Caller side:** `TenantAwareClientProxy.enrich()` reads `tenantSlug`, `userId`, `userGroups` from CLS and adds them to the RPC payload as `_tenantSlug`, `_userId`, `_userGroups`
+2. **Receiver side:** `TenantClsInterceptor` reads `_tenantSlug`, `_userId`, `_userGroups` from the payload, strips them, and sets them in CLS
+
+```typescript
+// TenantClsInterceptor (RPC)
+if (type === 'rpc') {
+  const data = rpcContext.getData();
+  this.cls.run(() => {
+    if (data._tenantSlug) this.cls.set('tenantSlug', data._tenantSlug);
+    if (data._userId) this.cls.set('userId', data._userId);
+    if (data._userGroups) this.cls.set('userGroups', data._userGroups);
+    // ... handler executes with CLS context
+  });
+}
+```
+
+### Reading from CLS
+
+All context-aware components read from CLS:
+- `BaseSubgraphContext.userGroups()` → `this.cls?.get('userGroups')`
+- `BaseSubgraphContext.currentUserId()` → `this.cls?.get('userId')`
+- `PermissionsCacheService.resolveGroups()` → CLS fallback when HTTP headers are empty (RPC calls)
+
+**Important:** The CLS is the single source of truth for user/tenant context in both HTTP and RPC contexts. Components should always read from CLS, never directly from HTTP headers.
+
 ## Event-Driven Patterns
 
 ### Design Principles

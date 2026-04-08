@@ -59,6 +59,7 @@ export default defineConfig({
             { text: 'Organization', link: '/services/organization' },
             { text: 'Project Access', link: '/services/project-access' },
             { text: 'Projects', link: '/services/projects' },
+            { text: 'Rates', link: '/services/rates' },
             { text: 'Tenants', link: '/services/tenants' },
             { text: 'Users', link: '/services/users' },
             { text: 'Audit', link: '/services/audit' },

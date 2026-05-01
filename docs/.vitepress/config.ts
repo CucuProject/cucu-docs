@@ -92,6 +92,13 @@ export default defineConfig({
           ]
         },
         {
+          text: 'RFCs',
+          collapsed: false,
+          items: [
+            { text: 'Agent AI Hybrid Gantt FE Audit', link: '/rfcs/agent-ai-hybrid-gantt-fe-audit' },
+          ]
+        },
+        {
           text: 'Reference',
           collapsed: false,
           items: [

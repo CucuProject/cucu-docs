@@ -1,229 +1,152 @@
 # Users Service
 
-The Users service owns the **User** entity — the central domain object representing people in the system. Users have nested sub-documents for authentication data, personal information, employment details, and organizational metadata.
+The Users service owns the tenant-scoped `User` entity: People data, employment information, organizational references, supervisor hierarchy, capacity periods, soft/hard delete lifecycle, and the legacy group mirror used by Auth.
 
-## Overview
+It is also a synchronization point for Resources, GroupAssignments, MilestoneToResource, Auth, Rates, Organization, and ProjectAccess.
+
+## Service Profile
 
 | Property | Value |
-|----------|-------|
-| Port | 3002 |
+|---|---|
+| Runtime | NestJS subgraph + Redis RPC/events |
 | Database | `users_{tenantSlug}` |
 | Collection | `users` |
-| Module | `UsersModule` |
-| Context | `UsersContext` (request-scoped) |
+| App module | `apps/users/src/users.module.ts` |
+| Context | `UsersContext` |
 
-### Domain Entities
+## Responsibilities
 
-| Entity | Description |
-|--------|-------------|
-| `User` | Core user record with nested AuthData, PersonalData, EmploymentData, AdditionalFieldsData |
-| `AuthDataSchema` | Name, surname, email, password (deprecated — now in platform DB), groupIds |
-| `PersonalDataSchema` | Date of birth, place of birth, citizenship, languages |
-| `EmploymentDataSchema` | Employment dates, costs, RAL, rates, location |
-| `AdditionalFieldsDataSchema` | Job roles, seniority level, supervisors, company, active status, avatar color, billable |
+- GraphQL CRUD for users.
+- People list filtering, pagination, sorting, and filter-count aggregation.
+- Field-level view/edit grants with self/all scopes.
+- Date and capacity-period validation.
+- Supervisor/subordinate graph traversal.
+- Soft delete, restore, and hard delete.
+- Group mirror sync through `USER_GROUPS_CHANGED`.
+- Event emission to `group-assignments`, `milestone-to-resource`, `resources`, and `auth`.
+- RPC support for Auth, ProjectAccess, Rates, Organization, and Bootstrap.
 
-## Architecture
+## Data Model
 
-### Module Structure
+`User` is stored in `users` with nested subdocuments:
 
-```
-UsersModule
-├── TenantDatabaseModule.forService('users')
-├── ConfigModule (global)
-├── TenantAwareClientsModule
-│   ├── GRANTS_SERVICE
-│   ├── MILESTONE_TO_USER_SERVICE
-│   ├── GROUP_ASSIGNMENTS_SERVICE
-│   ├── AUTH_SERVICE
-│   └── ORGANIZATION_SERVICE
-├── MicroservicesOrchestratorModule
-└── GraphQLModule (ApolloFederationDriver)
-    └── orphanedTypes: [JobRole, SeniorityLevel, Company]
+| Section | Purpose |
+|---|---|
+| `authData` | Name, surname, email, legacy password hash, and mirrored `groupIds`. |
+| `personalData` | Birth data, citizenship, languages, creation date. |
+| `employmentData` | Employment dates, cost, RAL, location. |
+| `additionalFieldsData` | Job roles, seniority, role category, supervisors, company, active flag, billable flag, capacity. |
 
-Controllers: UsersController
-Resolvers: UsersResolver, AdditionalFieldsResolver
-```
+Indexes:
 
-## User Schema
+- `{ additionalFieldsData.supervisorIds: 1, deletedAt: 1 }`
+- `{ authData.groupIds: 1, deletedAt: 1 }`
+- `{ authData.email: 1, deletedAt: 1 }` unique
 
-```typescript
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-class User {
-  _id: string                              // Federation key
-  authData: AuthDataSchema                 // name, surname, email, password (nested)
-  personalData?: PersonalDataSchema        // DOB, citizenship, languages (nested)
-  employmentData?: EmploymentDataSchema    // dates, costs, RAL (nested)
-  additionalFieldsData?: AdditionalFieldsDataSchema  // roles, seniority, supervisors (nested)
-  milestones?: MilestoneToUser[]          // Federation — resolved via RPC
-  subordinates?: User[]                    // Self-reference — supervisor hierarchy
-  tenantId?: string                        // Defence-in-depth
-  deletedAt?: Date                         // Soft delete timestamp
-  deletedBy?: string                       // Who deleted this user
-  updatedBy?: string                       // Last updater
-  createdAt?: Date
-  updatedAt?: Date
+`authData.password` is deprecated. Platform `user_identities.passwordHash` in Tenants is the password source of truth.
+
+## GraphQL API
+
+| Type | Name | Args | Notes |
+|---|---|---|---|
+| Query | `findAllUsers` | `pagination?`, `filter?`, `sort?` | List or paginated People query. |
+| Query | `getUserFilterCounts` | none | `$facet` aggregate for People filters. |
+| Query | `findOneUser` | `userId`, `includeDeleted?` | Scope-capable by `userId`. |
+| Query | `findDeletedUsers` | `filter?`, `sort?` | Soft-deleted users. |
+| Mutation | `createUser` | `createUserInput` | Hashes password when present and emits downstream events. |
+| Mutation | `updateUser` | `updateUserInput` | Enforces editable-field grants and lifecycle rules. |
+| Mutation | `removeUser` | `userId` | Anti-self-delete, supervisor guard, soft delete. |
+| Mutation | `restoreUser` | `userId` | Restores soft-deleted user. |
+| Mutation | `hardDeleteUser` | `userId` | Permanently deletes an already soft-deleted user. |
+| ResolveField | `User.subordinates` | parent | Users whose `supervisorIds` contain the parent user. |
+| ResolveField | `User.milestones` | parent | Calls `FIND_MILESTONE_TO_RESOURCE_BY_USER_ID` and returns `MilestoneToResource` stubs. |
+| ResolveField | `User.rates` | parent | Calls `rates.RESOLVE_RATE`. |
+| ResolveField | `AdditionalFieldsData.seniorityLevel` | parent | Calls Organization bulk lookup. |
+| ResolveField | `AdditionalFieldsData.jobRoles` | parent | Calls Organization bulk lookup. |
+| ResolveField | `AdditionalFieldsData.company` | parent | Calls Organization bulk lookup. |
+| ResolveField | `AdditionalFieldsData.supervisors` | parent | Resolves users by ids locally. |
+
+## RPC API
+
+| Pattern | Purpose |
+|---|---|
+| `USER_EXISTS` | Tenant-aware existence check. |
+| `CREATE_USER` | Bootstrap-only user creation. |
+| `FIND_USER_RATE_CONTEXT_BY_IDS` | Role/seniority context for Rates. |
+| `FIND_USERS_BASIC_BY_IDS` | Basic user and capacity data for resource/Gantt lookups. |
+| `FIND_USER_BY_EMAIL` | Lookup by email; `forAuth=true` is legacy. |
+| `FIND_USER_WITH_PASSWORD` | Password hash + email for Auth password change. |
+| `UPDATE_USER` | Bootstrap-only update; rejects calls with user context. |
+| `UPDATE_USER_PASSWORD` | Sync a pre-hashed password from Auth. |
+| `FIND_GROUPIDS_BY_USERID` | Reads live assignments from GroupAssignments. |
+| `GET_ORG_ENTITY_USAGE_COUNT` | Referential usage counts for Organization. |
+| `GET_SUPERVISOR_CHAIN` | Recursive upward supervisor chain. |
+| `GET_ALL_SUBORDINATE_IDS` | Recursive downward subordinate graph. |
+| `GET_USER_SUPERVISOR_IDS` | Direct supervisors only. |
+
+## Events
+
+Inbound:
+
+| Pattern | Effect |
+|---|---|
+| `USER_DELETED` | No-op to avoid event loops. |
+| `USER_GROUPS_CHANGED` | Re-read group assignments and sync `authData.groupIds`. |
+| `PERMISSIONS_CHANGED` | Invalidate permission cache. |
+
+Outbound:
+
+| Pattern | Target | When |
+|---|---|---|
+| `USER_CREATED` | MilestoneToResource, GroupAssignments | After create. |
+| `USER_UPDATED` | MilestoneToResource, GroupAssignments | When assignments/groups change. |
+| `USER_DELETED` | MilestoneToResource, GroupAssignments | After soft delete. |
+| `USER_HARD_DELETED` | MilestoneToResource, GroupAssignments | After hard delete. |
+| `REVOKE_ALL_SESSIONS` | Auth | When a user is deactivated. |
+| `RESOURCE_USER_UPSERT` | Resources | After create/update. |
+| `RESOURCE_USER_DELETED` | Resources | After delete. |
+
+## Core Business Rules
+
+- Password fields are stripped from all user responses.
+- Ordinary user updates cannot write `authData.password`.
+- Internal RPC without user context may bypass field grants; user-context calls remain filtered.
+- A deactivated user can only be reactivated before other updates are allowed.
+- A user cannot be deactivated or deleted while still supervising other users.
+- A user cannot delete themself through GraphQL.
+- Capacity periods must be date-only, non-overlapping, max 24 entries, and use daily hours between 0 and 24.
+- Supervisor traversal uses visited sets to avoid infinite loops.
+
+## Example
+
+```graphql
+query User($id: String!) {
+  findOneUser(userId: $id) {
+    _id
+    authData { name surname email }
+    additionalFieldsData { active supervisorIds dailyCapacityHours }
+  }
 }
 ```
 
-### Nested Schemas
+## Relevant Tests
 
-**AuthDataSchema:**
-```
-name: string (required)
-surname: string (required)
-email: string (required, unique with deletedAt index)
-password: string (required — @deprecated, kept for backward compat)
-groupIds: string[] (virtual — resolved via GroupAssignments RPC)
-```
+- `apps/users/tests/users-controller.spec.ts`
+- `apps/users/tests/users-service.spec.ts`
+- `apps/users/tests/users-resolver.spec.ts`
 
-**PersonalDataSchema:**
-```
-dateOfBirth?: string
-placeOfBirth?: string
-citizenship?: string
-languages?: [{code: string, level: number}]  // ISO 639-1, proficiency 1-5
-dateOfCreation?: string
-```
+## Notes and Risks
 
-**EmploymentDataSchema:**
-```
-dateOfEmployment?: string
-endDate?: string
-companyCosts?: number
-RAL?: number
-rates?: number
-location?: string
-```
+- Older docs referenced `milestone-to-user` and `MilestoneToUser`; the current code uses `milestone-to-resource` and `MilestoneToResource`.
+- `User.subordinates` has a TODO for DataLoader batching.
+- `authData.groupIds` is a mirror, not the source of truth.
 
-**AdditionalFieldsDataSchema:**
-```
-jobRoleIds: ObjectId[]         → resolved via Federation to JobRole[]
-seniorityLevelId?: ObjectId    → resolved via Federation to SeniorityLevel
-supervisorIds: ObjectId[]      → resolved to User[] via self-query
-companyId?: ObjectId           → resolved via Federation to Company
-active?: boolean
-avatarColor?: number           // 1-10, assigned at creation
-billable: boolean              // default: false
-```
+## Source References
 
-### Indexes
-
-| Fields | Type | Purpose |
-|--------|------|---------|
-| `{additionalFieldsData.supervisorIds, deletedAt}` | Compound | Subordinate queries |
-| `{authData.groupIds, deletedAt}` | Compound | Filter by group |
-| `{authData.email, deletedAt}` | Compound unique | Email uniqueness |
-
-## GraphQL Schema
-
-### Queries
-
-| Query | Args | Return | Description |
-|-------|------|--------|-------------|
-| `findAllUsers` | `pagination?, filter?: UserFilterInput, sort?: SortInput` | `PaginatedUsers!` | List users with optional filtering/pagination |
-| `findOneUser` | `userId: ID!, includeDeleted?: Boolean` | `User!` | Get single user. `@ScopeCapable('userId')` — scope=SELF restricts to own profile |
-| `getUserFilterCounts` | — | `UserFilterCounts!` | Aggregated counts for filter sidebar (status, seniority, jobRole, supervisor, company) |
-| `findDeletedUsers` | `filter?, sort?` | `PaginatedUsers!` | List soft-deleted users |
-
-### Mutations
-
-| Mutation | Args | Return | Description |
-|----------|------|--------|-------------|
-| `createUser` | `createUserInput: CreateUserInput!` | `User!` | Create user. Emits USER_CREATED to M2U + GA |
-| `updateUser` | `updateUserInput: UpdateUserInput!` | `User!` | Update user. `@ScopeCapable('updateUserInput._id')`. Emits USER_UPDATED to M2U + GA |
-| `removeUser` | `userId: ID!` | `DeleteUserOutput!` | Soft delete. Anti-self-delete guard. Emits USER_DELETED to Auth + M2U + GA |
-| `restoreUser` | `userId: ID!` | `User!` | Restore soft-deleted user |
-| `hardDeleteUser` | `userId: ID!` | `DeleteUserOutput!` | Permanent deletion |
-
-### ResolveField
-
-| Field | On | Returns | Description |
-|-------|-----|---------|-------------|
-| `subordinates` | `User` | `[User]` | Users where `supervisorIds` contains this user's `_id`. `@CheckFieldView` enforced |
-| `milestones` | `User` | `[MilestoneToUser]` | Federation stubs via `FIND_MILESTONE_TO_USER_BY_USER_ID` RPC |
-| `groupIds` | `AuthDataSchema` | `[ID]` | Live group IDs via `FIND_GROUP_ASSIGNMENTS_BY_USER_ID` RPC |
-
-### Federation
-
-- `@ResolveReference()` — resolves `User` entity by `_id`
-- **orphanedTypes**: `JobRole`, `SeniorityLevel`, `Company` (stubs for organization entities)
-
-## RPC Patterns
-
-### MessagePattern Handlers
-
-All RPC handlers use formal DTOs with `class-validator` decorators, validated by the global `ValidationPipe`:
-
-| Pattern | DTO | Output | Purpose |
-|---------|-----|--------|---------|
-| `USER_EXISTS` | `UserExistsRpcDto` | `boolean` | Check if user exists |
-| `CREATE_USER` | `CreateUserInput` | `User` | Create user (bootstrap) |
-| `FIND_USER_BY_EMAIL` | `FindUserByEmailRpcDto` | `{_id, password?, groupIds} \| null` | Find by email. `forAuth=true` returns password hash (deprecated) |
-| `FIND_USER_WITH_PASSWORD` | `FindUserWithPasswordRpcDto` | `{_id, password, email} \| null` | Get password hash (for changePassword) |
-| `UPDATE_USER` | `UpdateUserInput` | `User` | Update user (bootstrap) |
-| `UPDATE_USER_PASSWORD` | `UpdateUserPasswordRpcDto` | void | Update password hash (pre-hashed) |
-| `FIND_GROUPIDS_BY_USERID` | `FindGroupIdsRpcDto` | `{groupIds: string[]}` | Get group IDs for a user |
-| `GET_ORG_ENTITY_USAGE_COUNT` | `OrgEntityUsageCountRpcDto` | `number` | Count users referencing a lookup entity |
-| `GET_SUPERVISOR_CHAIN` | `{userId: string}` | `string[]` | All supervisor IDs going up the hierarchy from `userId` (cycle-safe — stops if a repeated node is encountered) |
-| `GET_ALL_SUBORDINATE_IDS` | `{userId: string}` | `string[]` | All subordinate IDs going down the hierarchy from `userId` (cycle-safe) |
-| `GET_USER_SUPERVISOR_IDS` | `{userId: string}` | `string[]` | Direct supervisor IDs only (one level up, equivalent to `additionalFieldsData.supervisorIds`) |
-
-### EventPattern Handlers
-
-| Pattern | Input | Action |
-|---------|-------|--------|
-| `USER_DELETED` | `{userId}` | No-op (service already notified dependents directly) |
-| `USER_GROUPS_CHANGED` | `{userId}` | Sync `authData.groupIds` in user document from GroupAssignments |
-| `PERMISSIONS_CHANGED` | `{groupIds}` | Invalidate local permission cache |
-
-### Outbound Events
-
-| Target | Pattern | When |
-|--------|---------|------|
-| Auth | `USER_DELETED` | After soft/hard delete |
-| MilestoneToUser | `USER_CREATED`, `USER_UPDATED`, `USER_DELETED`, `USER_HARD_DELETED` | After CRUD |
-| GroupAssignments | `USER_CREATED`, `USER_UPDATED`, `USER_DELETED`, `USER_HARD_DELETED` | After CRUD |
-
-## Business Logic
-
-### Soft Delete
-
-```typescript
-async remove(userId: string, viewable?: Set<string>, requestUserId?: string) {
-  // 1. Find user, throw if not found
-  // 2. Set deletedAt = now, deletedBy = requestUserId
-  // 3. Set additionalFieldsData.active = false
-  // 4. Emit USER_DELETED to auth, mt2u, ga
-  // 5. Return deleted user (with field projection)
-}
-```
-
-### Anti-Self-Delete
-
-```typescript
-if (requestUserId && requestUserId === userId) {
-  throw new ForbiddenException('You cannot delete your own account');
-}
-```
-
-### Supervisor Hierarchy
-
-Users can have multiple supervisors via `additionalFieldsData.supervisorIds`. The `subordinates` ResolveField queries users where `supervisorIds` contains the parent user's `_id`.
-
-### AdditionalFieldsResolver
-
-Resolves organization references on `AdditionalFieldsDataSchema`:
-- `seniorityLevel` → `{ __typename: 'SeniorityLevel', _id: data.seniorityLevelId }`
-- `jobRoles` → `data.jobRoleIds.map(id => ({ __typename: 'JobRole', _id: id }))`
-- `company` → `{ __typename: 'Company', _id: data.companyId }`
-- `supervisors` → Direct DB query for users by IDs (same service)
-
-### User Filter Counts
-
-Single MongoDB aggregation that returns counts for the filter sidebar:
-- Active/inactive/deleted counts
-- Count per seniority level
-- Count per job role
-- Count per supervisor
-- Count per company
+- `apps/users/src/users.module.ts`
+- `apps/users/src/users.controller.ts`
+- `apps/users/src/users.resolver.ts`
+- `apps/users/src/users.service.ts`
+- `apps/users/src/additional-fields.resolver.ts`
+- `apps/users/src/user-rates.resolver.ts`
+- `apps/users/src/schemas/user.schema.ts`

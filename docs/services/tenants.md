@@ -1,219 +1,189 @@
 # Tenants Service
 
-The Tenants service manages the **platform-level** database — tenant registration, provisioning, user identities (Universal Auth), and platform administration. Unlike all other services, it uses a **shared MongoDB database** (not per-tenant isolation) via standard `MongooseModule.forRoot()`.
+The Tenants service owns Cucu's platform database: tenant registry, Universal Auth identities, tenant signup/provisioning, platform admin checks, and tenant discovery.
 
-## Overview
+Unlike tenant runtime services, it does not use `TenantDatabaseModule`. It connects to the shared platform MongoDB through `MONGODB_URI`. It still imports `TenantClsModule` because Redis/RPC calls may carry `_tenantSlug` metadata and the shared subgraph pipeline expects an active CLS context.
+
+## Service Profile
 
 | Property | Value |
-|----------|-------|
-| Port | 3013 |
-| Database | Shared platform DB (via `MONGODB_URI`) |
+|---|---|
+| Runtime | NestJS subgraph + Redis RPC + internal HTTP |
+| Database | Shared platform DB |
 | Collections | `tenants`, `user_identities`, `platform_admins`, `tenantadmins` |
-| Module | `TenantsModule` |
-| Context | `TenantsContext` (request-scoped) |
+| App module | `apps/tenants/src/tenants.module.ts` |
+| Main service | `apps/tenants/src/tenants.service.ts` |
 
-**Key difference**: This service does NOT import `TenantDatabaseModule`. It connects to a single shared database for cross-tenant operations.
+## Responsibilities
 
-## Schemas
+- Manage tenant records, status, plans, limits, branding, default currency, and lifecycle operations.
+- Validate tenant slugs with regex, blacklist, and uniqueness checks.
+- Verify Universal Auth identities for Gateway login.
+- Store the platform password source of truth in `user_identities.passwordHash`.
+- Resolve tenant memberships for discovery and tenant switching.
+- Provision initial tenant databases, indexes, base groups, admin user, and identity membership.
+- Provide platform admin checks with `user_identities` as primary and legacy `platform_admins` as fallback.
 
-### Tenant
+## Data Ownership
 
-```typescript
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-class Tenant {
-  _id: string
-  slug: string              // unique, regex: /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/
-  name: string
-  status: 'provisioning' | 'active' | 'trial' | 'suspended' | 'archived' | 'deleted' | 'provisioning_failed'
-  plan: 'trial' | 'starter' | 'professional' | 'enterprise'
-  ownerEmail: string
-  primaryColor?: string
-  logoUrl?: string
-  settings?: string         // JSON string
-  limits?: { maxUsers: number, maxProjects: number, maxStorageMb: number }
-  trialExpiresAt?: Date
-  billingCustomerId?: string
-  billingSubscriptionId?: string
-  suspendedAt?: Date
-  scheduledDeletionAt?: Date
-  provisioningStartedAt?: Date
-  provisioningCompletedAt?: Date
-  customDomain?: string     // unique, sparse
-  deletedAt?: Date
-}
+### `tenants`
 
-// Indexes: slug (unique), status, customDomain (unique sparse), ownerEmail, deletedAt
-```
+Key fields include `slug`, `name`, `status`, `plan`, `ownerEmail`, `primaryColor`, `logoUrl`, `limits`, `trialExpiresAt`, billing references, provisioning timestamps, `customDomain`, `defaultCurrency`, and `deletedAt`.
 
-### UserIdentity (Universal Auth)
+Indexes:
 
-```typescript
-@Schema({ timestamps: true, collection: 'user_identities' })
-class UserIdentity {
-  _id: ObjectId
-  email: string             // unique, lowercase, trimmed
-  passwordHash: string
-  name: string
-  surname: string
-  isPlatformAdmin: boolean  // default: false
-  memberships: TenantMembership[]
-}
+- `slug` unique
+- `status`
+- `customDomain` unique partial string
+- `ownerEmail`
+- `deletedAt`
 
-class TenantMembership {
-  tenantSlug: string
-  tenantId: ObjectId
-  userId: ObjectId          // → User._id in the tenant's users DB
-  role: 'owner' | 'admin' | 'member'
-  joinedAt: Date
-}
+### `user_identities`
 
-// Index: { email: 1 } (unique)
-```
+`UserIdentity` stores normalized email, password hash, name/surname, `isPlatformAdmin`, memberships, and lockout state.
 
-### PlatformAdmin (Legacy)
+Membership fields:
 
-```typescript
-@Schema({ timestamps: true, collection: 'platform_admins' })
-class PlatformAdmin {
-  email: string
-  password: string          // bcrypt hash
-  name: string
-  surname: string
-}
-```
+- `tenantSlug`
+- `tenantId`
+- `userId`
+- `role`
+- `joinedAt`
 
-## REST Endpoints
+Lockout fields:
+
+- `failedLoginAttempts`
+- `lockoutUntil`
+
+Index: `email` unique.
+
+## REST API
 
 | Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| `GET` | `/tenants/resolve/:slug` | `x-internal-resolve` header (`TENANT_RESOLVE_SECRET`) | Resolve tenant config by slug (for FE middleware) |
+|---|---|---|---|
+| `GET` | `/tenants/resolve/:slug` | `x-internal-resolve` equals `TENANT_RESOLVE_SECRET` | Server-to-server tenant config lookup for frontend middleware. |
 
-::: warning Tenant Endpoints Moved to Gateway
-The following endpoints were **moved to the Gateway** (`TenantsController`) as of F-043:
-- `POST /tenants/signup` → Gateway proxies to `SIGNUP_TENANT` RPC
-- `GET /tenants/check-slug/:slug` → Gateway proxies to `CHECK_SLUG_AVAILABILITY` RPC
-- `GET /tenants/status/:id` → Gateway proxies to `GET_TENANT_STATUS` RPC
+Public signup/check/status endpoints live at the Gateway and proxy to Tenants RPC.
 
-This consolidates all public-facing HTTP endpoints in the Gateway. The `resolve/:slug` endpoint remains in the Tenants subgraph because it's called server-to-server by Next.js middleware, protected by `TENANT_RESOLVE_SECRET` via timing-safe comparison of the `x-internal-resolve` header.
-:::
+## GraphQL API
 
-## GraphQL Schema
+| Type | Name | Args | Notes |
+|---|---|---|---|
+| Query | `findAllTenants` | `pagination?`, `status?` | Platform tenant list. |
+| Query | `findOneTenant` | `id` | Tenant by ObjectId. |
+| Query | `supportedCurrencies` | none | Static currency metadata. |
+| Mutation | `createTenant` | `input` | Creates a tenant in `provisioning`; does not run provisioning by itself. |
+| Mutation | `updateTenant` | `input` | Tenant metadata update. |
+| Mutation | `suspendTenant` | `id` | Only `active` or `trial` tenants. |
+| Mutation | `reactivateTenant` | `id` | Only suspended tenants. |
+| Mutation | `extendTrial` | `id`, `days` | Trial plan only, 1-30 days. |
+| ResolveField | `Tenant.userCount` | parent | Currently a stub returning `0`. |
 
-### Queries
+## RPC API
 
-| Query | Args | Return |
-|-------|------|--------|
-| `findAllTenants` | `pagination?, status?` | `PaginatedTenants!` |
-| `findOneTenant` | `id: ID!` | `Tenant!` |
+| Pattern | Purpose |
+|---|---|
+| `SIGNUP_TENANT` | Validate slug, create tenant, and run provisioning. |
+| `GET_TENANT_STATUS` | Poll provisioning status after signup. |
+| `TENANT_EXISTS` | Referential existence check. |
+| `FIND_TENANT_BY_ID` | Platform tenant lookup by id. |
+| `FIND_TENANT_BY_SLUG` | Tenant lookup by slug. |
+| `RESOLVE_TENANT_BY_SLUG` | Active/non-deleted tenant resolve. |
+| `GET_TENANT_DEFAULT_CURRENCY` | Returns tenant currency, defaulting to `EUR`. |
+| `UPDATE_TENANT` | Update tenant metadata. |
+| `CHECK_SLUG_AVAILABILITY` | Slug regex/blacklist/unique check. |
+| `BOOTSTRAP_TENANT` | Idempotent bootstrap provisioning. |
+| `CHECK_PLATFORM_ADMIN` | Primary identity check plus legacy fallback. |
+| `LOGIN_PLATFORM_ADMIN` | Legacy platform admin login. |
+| `SEED_PLATFORM_ADMIN` | Seed platform admin. |
+| `DISCOVER_TENANTS` | Email to tenant memberships. |
+| `VERIFY_IDENTITY_PASSWORD` | Login password + membership validation. |
+| `SWITCH_TENANT` | Verify membership for tenant switch. |
+| `GET_IDENTITY_MEMBERSHIPS` | Membership/admin enrichment. |
+| `UPDATE_IDENTITY_PASSWORD` | Sync password hash from Auth password change. |
+| `UPSERT_USER_IDENTITY` | Create/update identity and membership. |
+| `CHECK_ACCOUNT_LOCKOUT` | Read lockout status. |
+| `HANDLE_LOGIN_FAILURE` | Increment failed attempts and apply lockout. |
 
-### Mutations
+## Core Flows
 
-| Mutation | Args | Return |
-|----------|------|--------|
-| `createTenant` | `input: CreateTenantInput!` | `Tenant!` |
-| `updateTenant` | `input: UpdateTenantInput!` | `Tenant!` |
-| `suspendTenant` | `id: ID!` | `Tenant!` |
-| `reactivateTenant` | `id: ID!` | `Tenant!` |
-| `extendTrial` | `id: ID!, days: Int!` | `Tenant!` |
+### Signup Provisioning
 
-### ResolveField
-
-| Field | On | Returns |
-|-------|-----|---------|
-| `userCount` | `Tenant` | `Int` (stub — returns 0, TODO: RPC to users service) |
-
-## RPC Patterns
-
-### Tenant Management
-
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `TENANT_EXISTS` | `string` | `boolean` | Check existence |
-| `FIND_TENANT_BY_ID` | `string` | `Tenant \| null` | Find by ID |
-| `FIND_TENANT_BY_SLUG` | `string` | `Tenant \| null` | Find by slug |
-| `RESOLVE_TENANT_BY_SLUG` | `string` | `Tenant \| null` | Resolve active tenant |
-| `CHECK_SLUG_AVAILABILITY` | `string` | `{valid, error?}` | Validate slug |
-| `SIGNUP_TENANT` | `SignupTenantRpcDto` | `{tenantId}` | Create tenant + provision databases (called by Gateway) |
-| `GET_TENANT_STATUS` | `{id}` | `{status, loginUrl?, error?}` | Poll provisioning status (called by Gateway) |
-| `BOOTSTRAP_TENANT` | `BootstrapTenantRpcDto` | `{success, tenantId, skipped?}` | Create + provision (idempotent, bootstrap only) |
+1. `SIGNUP_TENANT` validates slug availability.
+2. `TenantsService.create()` inserts a `tenants` record with `status: provisioning`.
+3. `TenantProvisioningService.provision()` creates tenant DBs for the configured `TENANT_SERVICES`.
+4. It applies service indexes from `service-indexes.ts`.
+5. It seeds base groups in `grants_{slug}`.
+6. It creates the admin user in `users_{slug}` with a platform-auth placeholder password.
+7. It creates or updates `user_identities` with the real password hash and owner membership.
+8. It marks the tenant `active` and sets the trial expiry.
+9. On failure, it drops created databases, removes the membership, and marks `provisioning_failed`.
 
 ### Universal Auth
 
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `VERIFY_IDENTITY_PASSWORD` | `VerifyIdentityPasswordRpcDto` | identity record | Verify password + check tenant membership |
-| `DISCOVER_TENANTS` | `DiscoverTenantsRpcDto` | `{memberships}` | List tenants for an email |
-| `SWITCH_TENANT` | `{email, tenantSlug}` | `{userId, tenantSlug, tenantId}` | Verify membership for tenant switch |
-| `GET_IDENTITY_MEMBERSHIPS` | `{email}` | `{memberships, isPlatformAdmin}` | Full identity info |
-| `UPDATE_IDENTITY_PASSWORD` | `UpdateIdentityPasswordRpcDto` | void | Update password hash |
-| `UPSERT_USER_IDENTITY` | `UpsertUserIdentityRpcDto` | identity | Create/update identity with membership |
+`VERIFY_IDENTITY_PASSWORD` normalizes email, checks lockout, verifies bcrypt password, resets lockout on success, and requires a membership for the requested `tenantSlug`.
 
-### Platform Admin
+Progressive lockout:
 
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `CHECK_PLATFORM_ADMIN` | `{email}` | `{isPlatformAdmin}` | Check via user_identities (primary) + platform_admins (fallback) |
-| `LOGIN_PLATFORM_ADMIN` | `LoginPlatformAdminRpcDto` | admin record or null | Legacy admin login |
-| `SEED_PLATFORM_ADMIN` | `{email, password, name, surname}` | admin | Bootstrap seeder |
+- 5 failed attempts: 15 minutes
+- 10 failed attempts: 30 minutes
+- 15 failed attempts: 60 minutes
 
-### RPC DTO Validation
+## Invariants
 
-All RPC handlers use formal DTOs validated by the global `ValidationPipe`:
+- Tenant slug rules are enforced before create/provisioning.
+- Password source of truth is platform `user_identities`, not `users.authData.password`.
+- Login requires both valid credentials and membership in the requested tenant.
+- Internal tenant resolve uses timing-safe secret comparison.
+- The service is platform DB scoped; tenant runtime DB work is limited to provisioning.
 
-| DTO | Pattern | Fields |
-|-----|---------|--------|
-| `SignupTenantRpcDto` | `SIGNUP_TENANT` | `slug, name, ownerEmail, adminPassword, adminName, adminSurname, plan?` |
-| `VerifyIdentityPasswordRpcDto` | `VERIFY_IDENTITY_PASSWORD` | `email, password, tenantSlug` |
-| `LoginPlatformAdminRpcDto` | `LOGIN_PLATFORM_ADMIN` | `email, password` |
-| `BootstrapTenantRpcDto` | `BOOTSTRAP_TENANT` | `slug, name, ownerEmail, adminPassword, adminName, adminSurname, plan?` |
-| `DiscoverTenantsRpcDto` | `DISCOVER_TENANTS` | `email` |
-| `UpdateIdentityPasswordRpcDto` | `UPDATE_IDENTITY_PASSWORD` | `email, newPasswordHash` |
-| `UpsertUserIdentityRpcDto` | `UPSERT_USER_IDENTITY` | `email, passwordHash, name, surname, isPlatformAdmin?, membership?` |
+## Cache and Audit
 
-## Provisioning
+No domain cache is implemented in the files reviewed. `AUDIT_SERVICE` is registered as a client, but no direct audit event emitters were found in the Tenants files reviewed.
 
-The `TenantProvisioningService` handles new tenant database creation:
+## Example
 
-```mermaid
-sequenceDiagram
-    participant Signup as POST /tenants/signup
-    participant Service as TenantsService
-    participant Prov as TenantProvisioningService
-    participant DB as MongoDB
-
-    Signup->>Service: checkSlugAvailability(slug)
-    Service-->>Signup: {valid: true}
-    
-    Signup->>Service: create({slug, name, ownerEmail, plan})
-    Service->>DB: Insert tenant (status: 'provisioning')
-    
-    Signup->>Prov: provision(tenantId, {slug, ownerEmail, adminPassword})
-    
-    Note over Prov: Create indexes for all service DBs
-    Note over Prov: service-indexes.ts defines required indexes per service
-    
-    Prov->>DB: Create user_identity with owner membership
-    Prov->>DB: Update tenant.status → 'active'
+```json
+{
+  "email": "admin@acme.test",
+  "password": "Str0ng!Pass",
+  "tenantSlug": "acme"
+}
 ```
 
-The provisioning creates the necessary MongoDB indexes for each service's tenant database (e.g., `users_{slug}`, `grants_{slug}`, etc.) as defined in `service-indexes.ts`.
+Valid `VERIFY_IDENTITY_PASSWORD` response:
 
-## Key Design Decisions
+```json
+{
+  "accountId": "665...",
+  "userId": "665...",
+  "tenantSlug": "acme",
+  "tenantId": "665...",
+  "isPlatformAdmin": false,
+  "email": "admin@acme.test"
+}
+```
 
-### Why Shared Database?
+## Relevant Tests
 
-The tenants service needs to:
-1. Look up tenants by slug (cross-tenant operation)
-2. Verify user identities across tenants (Universal Auth)
-3. Manage platform-wide admin accounts
+- `apps/tenants/tests/tenants-service.spec.ts`
+- `apps/tenants/tests/tenants-controller.spec.ts`
+- `apps/tenants/tests/tenant-provisioning.service.spec.ts`
 
-These operations are inherently cross-tenant, so a shared database is the correct choice.
+## Notes and Risks
 
-### Universal Auth Model
+- The provisioning service currently creates DBs for a historical subset of tenant services and does not include newer runtime services such as roadmaps, rates, resources, ai-agents, holidays, or milestone-to-resource.
+- `Tenant.userCount` returns `0`.
+- Provisioning is synchronous; the code comments call out BullMQ as future work.
 
-A single `UserIdentity` can have memberships in multiple tenants. This enables:
-- Single sign-on across tenants
-- Tenant switching without re-login
-- Centralized password management (source of truth)
-- Platform admin access to all tenants
+## Source References
+
+- `apps/tenants/src/tenants.module.ts`
+- `apps/tenants/src/tenants.controller.ts`
+- `apps/tenants/src/tenants.resolver.ts`
+- `apps/tenants/src/tenant-fields.resolver.ts`
+- `apps/tenants/src/tenants.service.ts`
+- `apps/tenants/src/provisioning/tenant-provisioning.service.ts`
+- `apps/tenants/src/provisioning/service-indexes.ts`
+- `apps/tenants/src/schemas/tenant.schema.ts`
+- `apps/tenants/src/schemas/user-identity.schema.ts`

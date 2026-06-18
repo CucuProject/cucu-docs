@@ -1,169 +1,195 @@
 # ProjectAccess Service
 
-The ProjectAccess service manages **project-level access control**. It defines which users have access to which projects, at what level, and exposes APIs to share, transfer ownership, and revoke access.
+The ProjectAccess service owns Cucu's current Project object-access model. It persists explicit Project-to-User roles and resolves effective access by combining explicit records, supervisor hierarchy, milestone allocation, and SUPERADMIN membership.
 
-## Overview
+This service answers "can this user see or act on this specific Project?" Operation and field permissions are handled separately by Grants.
+
+## Service Profile
 
 | Property | Value |
-|----------|-------|
-| Port | 3011 |
-| Database | `project-access_{tenantSlug}` |
-| Collection | `projectaccessdocuments` |
-| Module | `ProjectAccessModule` |
-| Context | `ProjectAccessContext` (request-scoped) |
+|---|---|
+| Runtime | NestJS subgraph + Redis RPC/events |
+| Database | `project_access_{tenantSlug}` |
+| Collection | `projectaccesses` |
+| App module | `apps/project-access/src/project-access.module.ts` |
+| Main service | `apps/project-access/src/project-access.service.ts` |
 
-## Schema
+## Responsibilities
 
-```typescript
-@Directive('@key(fields: "_id")')
-class ProjectAccess {
-  _id: string
-  projectId: string            // required
-  userId: string               // required
-  role: ProjectAccessRole      // OWNER | COLLABORATOR | EDITOR | VIEWER
-  tenantId?: string
-}
+- Persist explicit Project access records.
+- Create owner access for new projects.
+- Share projects with users.
+- Transfer ownership.
+- Revoke access.
+- Resolve effective project access level.
+- Return accessible project id sets to other services.
+- Assert project action permissions by section/action.
+- Filter GraphQL read results by the caller's accessible projects.
 
-// Unique index: { projectId, userId } — one role per user per project
+## Data Model
+
+`projectaccesses` fields:
+
+| Field | Purpose |
+|---|---|
+| `_id` | Federation key. |
+| `projectId` | Project target. |
+| `userId` | User subject. |
+| `role` | `owner`, `collaborator`, `editor`, or `viewer`. |
+| `tenantId` | Defense-in-depth metadata. |
+
+Unique index:
+
+```ts
+{ projectId: 1, userId: 1 }
 ```
 
-### ProjectAccessRole Enum
+There is one explicit role per user per project.
 
-| Value | String | Capabilities |
-|-------|--------|-------------|
-| `OWNER` | `owner` | Full control — view, edit, share, transfer ownership |
-| `COLLABORATOR` | `collaborator` | View + edit + share with others |
-| `EDITOR` | `editor` | View + edit |
-| `VIEWER` | `viewer` | View only |
+## Effective Access Sources
 
-## Access Sources
+The effective level is the highest role found:
 
-A user may gain access to a project through multiple sources. The effective level is the **highest** across all sources:
+| Source | Effective level |
+|---|---|
+| Explicit `projectaccesses` record | Stored role. |
+| Supervisor chain of project creator/owner | `editor`. |
+| User allocated to a milestone in the project | `viewer`. |
+| SUPERADMIN group membership | `owner` / unrestricted. |
 
-| Source | Effective Level | Notes |
-|--------|----------------|-------|
-| Explicit DB record | As stored (`owner`/`collaborator`/`editor`/`viewer`) | Created via share or auto-created at project creation |
-| Supervisor chain | `editor` | If the user is a supervisor (direct or indirect) of the project owner |
-| M2U implicit | `viewer` | If the user is allocated to a milestone linked to the project (no DB record needed) |
-| SUPERADMIN group | Full access | Members of the SUPERADMIN group bypass all access checks |
+Priority:
 
-## GraphQL Schema
+```text
+owner > collaborator > editor > viewer
+```
 
-### Queries
+## GraphQL API
 
-| Query | Args | Return |
-|-------|------|--------|
-| `findAllProjectAccess` | `pagination?, filter?, sort?` | `PaginatedProjectAccess!` |
-| `findProjectAccessByProjectId` | `projectId!, pagination?, sort?` | `PaginatedProjectAccess!` |
-| `findProjectAccessByUserId` | `userId!, pagination?, sort?` | `PaginatedProjectAccess!` `@ScopeCapable('userId')` |
-| `findOneProjectAccess` | `id: ID!` | `ProjectAccess!` |
-| `getProjectShares` | `projectId: ID!` | `[ProjectAccess]!` |
+| Type | Name | Args | Notes |
+|---|---|---|---|
+| Query | `findAllProjectAccess` | `pagination?`, `filter?`, `sort?` | Requires auth and applies readable project filter. |
+| Query | `findProjectAccessByProjectId` | `projectId`, `pagination?`, `sort?` | Caller must view the project. |
+| Query | `findProjectAccessByUserId` | `userId`, `pagination?`, `sort?` | Scope-capable by `userId`. |
+| Query | `findOneProjectAccess` | `id` | Checks caller can read that record's project. |
+| Query | `getProjectShares` | `projectId` | Caller must have project access. |
+| Mutation | `createProjectAccess` | input | Caller must be allowed to share. |
+| Mutation | `updateProjectAccess` | input | Caller must be allowed to share. |
+| Mutation | `removeProjectAccess` | id | Caller must be allowed to share. |
+| Mutation | `shareProject` | projectId, userId, role | Role cannot be owner. |
+| Mutation | `transferOwnership` | projectId, newOwnerId | Supervisor of owner or SUPERADMIN only. |
+| Mutation | `revokeAccess` | projectId, userId | Cannot revoke owner or self. |
+| ResolveField | `project` | parent | Federated Project stub. |
+| ResolveField | `user` | parent | Federated User stub. |
 
-### Mutations
+## RPC and Events
 
-| Mutation | Args | Return | Who Can Call |
-|----------|------|--------|-------------|
-| `shareProject` | `input: ShareProjectInput!` | `ProjectAccess!` | Owner, `collaborator`, or supervisor of owner |
-| `transferOwnership` | `input: TransferOwnershipInput!` | `ProjectAccess!` | Supervisor of current owner, or SUPERADMIN |
-| `revokeAccess` | `input: RevokeAccessInput!` | `Boolean!` | Owner, `collaborator`, or supervisor of owner. Cannot revoke the owner record. |
+Inbound:
 
-### ResolveField
+| Pattern | Kind | Purpose |
+|---|---|---|
+| `HAS_PROJECT_ACCESS` | Message | Explicit-record existence check. |
+| `GET_ACCESSIBLE_PROJECT_IDS` | Message | Explicit project ids only. |
+| `PROJECT_ACCESS_EXISTS` | Message | Record existence by id. |
+| `CREATE_PROJECT_ACCESS` | Message | Bootstrap direct create. |
+| `FIND_PROJECT_ACCESS_BY_PROJECT_AND_USER` | Message | Explicit record existence. |
+| `PROJECT_OWNER_CREATED` | Event | Backward-compatible owner record creation. |
+| `CREATE_OWNER_ACCESS` | Message | Synchronous owner record creation. |
+| `GET_ALL_ACCESSIBLE_PROJECT_IDS` | Message | Explicit + supervisor + milestone allocation + SUPERADMIN. |
+| `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | Message | Explicit + supervisor + SUPERADMIN, no milestone lookup. |
+| `GET_PROJECT_ACCESS_LEVEL` | Message | Effective access level. |
+| `ASSERT_PROJECTS_ACCESS` | Message | Batch section/action assertion. |
+| `PERMISSIONS_CHANGED` | Event | Invalidate permission cache. |
 
-| Field | On | Returns |
-|-------|-----|---------|
-| `project` | `ProjectAccess` | `Project` (federation stub) |
-| `user` | `ProjectAccess` | `User` (federation stub) |
+Outbound dependencies:
 
-## RPC Patterns
+- Projects: project status, existence, creator lookup, createdBy update, projects by creator.
+- Users: user existence, group ids, supervisor chain, subordinates.
+- Grants: SUPERADMIN group lookup.
+- MilestoneToResource: user milestone ids and MTR-in-project checks.
+- MilestoneToProject: project ids for milestone ids.
 
-### MessagePattern Handlers
+## Core Flows
 
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `GET_PROJECT_ACCESS_LEVEL` | `{projectId: string, userId: string}` | `{level: 'owner'\|'collaborator'\|'editor'\|'viewer'\|null}` | Effective access level for a user on a project (all sources combined) |
-| `GET_ALL_ACCESSIBLE_PROJECT_IDS` | `{userId: string}` | `{projectIds: string[], isUnrestricted: boolean}` | All project IDs the user can access (explicit + supervisor + M2U). `isUnrestricted: true` for SUPERADMIN |
-| `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | `{userId: string}` | `{projectIds: string[], isUnrestricted: boolean}` | Only explicit DB records + supervisor chain — **no M2U lookup** (see circular dependency note) |
-| `HAS_PROJECT_ACCESS` | `{userId: string, projectId: string}` | `boolean` | Quick existence check (any access level) |
-| `PROJECT_ACCESS_EXISTS` | `string` (id) | `boolean` | Check if a record exists by `_id` |
+### Access Level Resolution
 
-### EventPattern Handlers
+`GET_PROJECT_ACCESS_LEVEL` checks:
 
-| Pattern | Input | Action |
-|---------|-------|--------|
-| `PROJECT_OWNER_CREATED` | `{projectId: string, userId: string}` | Auto-creates an `OWNER` record for the creator when a project is created |
-| `PERMISSIONS_CHANGED` | `{groupIds: string[]}` | Invalidate permission cache |
+1. explicit access record;
+2. supervisor chain of the project creator;
+3. MTR allocation in the project;
+4. SUPERADMIN membership.
 
-## Business Logic
+It returns the highest level found, or `null`.
 
-### Effective Access Level Resolution
+### Accessible Project Ids
 
-When `GET_PROJECT_ACCESS_LEVEL` is called, the service resolves the level across all sources and returns the **highest** one:
+`GET_ALL_ACCESSIBLE_PROJECT_IDS` includes all implemented sources and returns `{ projectIds, isUnrestricted }`.
 
-1. **Explicit record** — look up `{projectId, userId}` in DB
-2. **Supervisor chain** — check if the user appears in the supervisor chain of the project's owner (via `GET_SUPERVISOR_CHAIN` on Users service). If yes → `editor` level
-3. **M2U implicit** — check if the user has any M2U record for milestones linked to this project (via `HAS_M2U_FOR_USER_IN_PROJECT`). If yes → `viewer` level
-4. **SUPERADMIN** — if the user is in the SUPERADMIN group → unrestricted
-
-The returned level is the maximum across all matching sources (owner > collaborator > editor > viewer).
+`GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` intentionally excludes MilestoneToResource/MilestoneToProject calls so milestone services can use it without circular dependency.
 
 ### Share API
 
-`shareProject` creates or updates a `ProjectAccess` record for the target user:
-- Caller must be the project owner, an `collaborator`, or a supervisor of the owner
-- Cannot downgrade the owner's record via this mutation (use `transferOwnership` instead)
-- If a record already exists for the target user, it is updated
+`shareProject`:
 
-`transferOwnership` moves the `OWNER` role to a new user:
-- Caller must be a supervisor of the current owner, or a SUPERADMIN
-- The previous owner's record is downgraded to `COLLABORATOR` (not `EDITOR` — preserves share capability)
-- The new owner's record is created or updated to `OWNER`
-- The Projects service is notified via `UPDATE_PROJECT_CREATED_BY`
+- rejects `owner` role;
+- rejects archived projects;
+- allows owner, collaborator, supervisor of owner, or SUPERADMIN;
+- creates or updates the target user's record.
 
-`revokeAccess` removes a `ProjectAccess` record:
-- Cannot revoke the project's owner record (returns error)
-- Caller must be the project owner, an `collaborator`, or a supervisor of the owner
+`transferOwnership`:
 
-`getProjectShares` lists all explicit `ProjectAccess` records for a project.
+- allows supervisor of current owner or SUPERADMIN only;
+- does not allow the owner to transfer by themself;
+- downgrades current owner to collaborator;
+- upserts the new owner;
+- updates `projects.createdBy` best effort.
 
-### Authorization Assertions
+`revokeAccess`:
 
-Two internal assertion methods enforce who can share and who can transfer:
+- rejects owner revocation;
+- rejects self-revocation;
+- requires share permission.
 
-| Assertion | Allowed callers |
-|-----------|----------------|
-| `assertCanShare` | Owner, `collaborator`, supervisor chain of the owner, SUPERADMIN |
-| `assertCanTransferOwnership` | Supervisor chain of the owner, SUPERADMIN **only** |
+## Invariants
 
-> **Note:** The project owner cannot transfer ownership to someone else directly — a supervisor or SUPERADMIN must perform the transfer.
+- Project access writes are blocked for archived projects.
+- GraphQL reads require authentication unless the call is internal without user context.
+- GraphQL list queries are filtered to projects readable by the caller.
+- `ASSERT_PROJECTS_ACCESS` uses `canProjectRole(level, section, action)` from `@cucu/permission-rules`.
+- `HAS_PROJECT_ACCESS` is explicit-record only; use `GET_PROJECT_ACCESS_LEVEL` for effective access.
 
-### Implicit Viewer via M2U
+## Example
 
-When a user is allocated to a milestone that belongs to a project, they automatically gain `viewer` access to that project — no DB record is created. This is resolved at query time via `GET_ALL_ACCESSIBLE_PROJECT_IDS` (which internally calls M2U).
-
-> **Note on ARCHIVED projects:** Users allocated via M2U retain their viewer access even when the project is ARCHIVED. Access is not revoked on archive.
-
-## Circular Dependency: `GET_EXPLICIT` vs `GET_ALL`
-
-A circular dependency exists between M2P/M2U and ProjectAccess when filtering queries by accessible projects:
-
-```
-findAllMilestones
-  → GET_ALL_ACCESSIBLE_PROJECT_IDS (project-access)
-    → HAS_M2U_FOR_USER_IN_PROJECT (milestone-to-user)   ← M2U calls back into M2U!
+```json
+{
+  "projectId": "665...",
+  "userId": "665..."
+}
 ```
 
-To break this cycle, `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` exists as a **safe alternative**:
-- It resolves explicit DB records + supervisor chain only
-- It does **not** call M2U
-- It is used by M2P and M2U when they need to filter their own queries by project access
+`GET_PROJECT_ACCESS_LEVEL` response:
 
-```
-findAllMilestones (M2U)
-  → GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS (project-access)  ← safe, no M2U call
-    → GET_MILESTONE_IDS_BY_PROJECT_IDS (M2P)
-      → return filtered milestones
+```json
+{ "level": "editor" }
 ```
 
-Rule of thumb:
-- `GET_ALL_ACCESSIBLE_PROJECT_IDS` — use from Projects service and downstream consumers that don't feed back into M2U/M2P
-- `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` — use from M2P and M2U to avoid circular calls
+## Relevant Tests
+
+- `apps/project-access/tests/project-access-controller.spec.ts`
+- `apps/project-access/tests/project-access-service.spec.ts`
+- `apps/project-access/tests/share-api.spec.ts`
+
+## Notes and Risks
+
+- `createOwnerAccess` trusts the caller and does not verify project/user existence.
+- `UPDATE_PROJECT_CREATED_BY` during transfer ownership is best effort; access records may already be changed if that RPC fails.
+- The future generic access model with target/subject types is not implemented here; current code is Project/User only.
+
+## Source References
+
+- `apps/project-access/src/project-access.module.ts`
+- `apps/project-access/src/project-access.controller.ts`
+- `apps/project-access/src/project-access.resolver.ts`
+- `apps/project-access/src/project-access.service.ts`
+- `apps/project-access/src/schemas/project-access.schema.ts`
+- `apps/project-access/src/enums/project-access-role.enum.ts`

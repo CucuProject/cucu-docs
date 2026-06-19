@@ -83,7 +83,7 @@ The older `JwtStrategy` still exists for Passport/guard compatibility, but the p
 | `GET` | `/auth/verify` | Public | `VERIFY_FROM_TOKEN` | Always returns HTTP 200; check `valid`. |
 | `GET` | `/auth/me` | Public | `GET_ME` | Returns user state and permissions for frontend layouts. |
 | `POST` | `/auth/discover` | Public | `DISCOVER_TENANTS` | Finds tenant memberships for an email. |
-| `POST` | `/auth/switch` | `GlobalAuthGuard` | `SWITCH_FROM_TOKEN` | Switches tenant and sets a new refresh cookie. |
+| `POST` | `/auth/switch` | `GlobalAuthGuard` | `SWITCH_FROM_TOKEN` | Switches tenant, sets the refresh cookie, and returns `accessToken`; current code does not refresh the `cucu_at` access cookie. |
 | `POST` | `/auth/force-revoke` | `GlobalAuthGuard` + grants operation | `CHECK_OPERATION_PERMISSION`, `REVOKE_SESSION` | Requires `forceRevokeSession`. |
 
 ### Tenant Endpoints
@@ -134,6 +134,8 @@ Side effects:
 - HTTP-only refresh cookie is set.
 - Access-token cookie is set for frontend middleware.
 - The password is never sent to `CREATE_AUTHENTICATED_SESSION`; Auth receives only the verified identity/session metadata.
+
+Tenant switch side effects differ from login/refresh in the current code: `/auth/switch` sets only the refresh cookie and returns the new access token in the JSON body. It does not call `setAccessTokenCookie()` for `cucu_at`; see Linear CUC-264..CUC-269 for the fix track.
 
 ## Federation Header Propagation
 
@@ -192,11 +194,14 @@ Controllers use `@SkipThrottle` to isolate buckets because Nest throttler v6 app
 - Tenant provisioning failures are surfaced through `/tenants/status/:id`; Gateway does not repair provisioning.
 - Grants outage during `force-revoke` blocks the privileged operation because the operation permission cannot be proven.
 - Client-supplied internal headers are stripped; injection attempts should be treated as security telemetry, not as valid tenant context.
+- `GET /auth/me` intentionally returns an unauthenticated shape on several downstream failures; frontend callers should not use it as a precise outage signal.
 
 ## Docs vs Code Notes
 
 - Historical Gateway docs that describe `JwtStrategy` plus `CHECK_SESSION` as the primary GraphQL auth path are stale. Current code uses `createJwtAuthMiddleware()` and Auth `VERIFY_ACCESS_TOKEN` before Apollo Gateway handles `/graphql`.
 - Gateway owns REST cookie mechanics and request metadata extraction, but session state and password verification remain in Auth/Tenants.
+- `/auth/switch` cookie behavior is not symmetric with `/auth/login` and `/auth/refresh` until CUC-264 is fixed.
+- Security observability and error taxonomy hardening for Gateway/Auth/Tenants/Grants is tracked by CUC-293..CUC-300.
 
 ## Source References
 

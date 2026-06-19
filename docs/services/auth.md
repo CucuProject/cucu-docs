@@ -45,6 +45,7 @@ Key enabled flows:
 - Access-token validation for every authenticated Gateway GraphQL request.
 - Refresh rotation with reuse detection, device fingerprint checks, and idle/max-age enforcement.
 - Password change with tenant DB update, best-effort platform identity sync, session revocation, and group-cache invalidation.
+- Tenant switching by validating the current refresh session, checking target membership, and issuing a new token pair.
 
 ## Main Modules
 
@@ -134,6 +135,8 @@ Outbound dependencies:
 4. Run session validation in tenant context when `tenantSlug` is present.
 5. Return only validated identity/session/group/tenant data to the Gateway.
 
+Session validation checks session existence, revocation, idle timeout, max age, and group ids. It does not re-check the current Users `active`/`deletedAt` state on every request. User deactivation therefore relies on the `REVOKE_ALL_SESSIONS` event from Users; that reliability gap is tracked in CUC-270..CUC-276.
+
 ### Session Creation
 
 The Gateway verifies credentials through Tenants first. Auth receives a verified identity and request metadata:
@@ -176,6 +179,8 @@ IP is intentionally excluded from the reuse lookup to avoid unnecessary session 
 6. Revoke all active sessions.
 7. Clear tenant-scoped group cache when tenant context is available.
 
+This is not currently atomic. Login uses the Tenants platform identity as source of truth, while the blocking write is the Users tenant password mirror. If `UPDATE_IDENTITY_PASSWORD` fails after `UPDATE_USER_PASSWORD`, the GraphQL mutation can still return success while future login keeps using the old platform password until reconciliation. The fix track is CUC-285..CUC-292.
+
 ## Audit Events
 
 | Event | Severity | Trigger |
@@ -197,6 +202,8 @@ groups:{tenantSlug}:{userId}
 
 TTL is 3600 seconds. Tenant slug is part of the key to avoid cross-tenant pollution.
 
+`TokenService.getGroupIds()` returns an empty group list when the Users `FIND_GROUPIDS_BY_USERID` RPC fails. That is fail-closed for permissions but can silently degrade the user context. Group cache invalidation and fail-policy hardening are tracked in CUC-277..CUC-284.
+
 ## Invariants
 
 - Refresh tokens are never stored in clear text.
@@ -214,11 +221,14 @@ TTL is 3600 seconds. Tenant slug is part of the key to avoid cross-tenant pollut
 - Idle timeout or max session age revokes the session during refresh/validation.
 - `GET_MY_PERMISSIONS` or membership enrichment failures degrade `/auth/me`/refresh enrichment but do not make Gateway trust unvalidated tokens.
 - Platform DB password sync during `changePassword` is best effort; tenant `users` update and session revocation are the blocking path.
+- Deactivation revocation depends on receiving `REVOKE_ALL_SESSIONS`; missed events can leave sessions valid until they are otherwise revoked or expire.
+- Group lookup failure during token/session refresh currently degrades to an empty group list, not a retried or surfaced dependency error.
 
 ## Docs vs Code Notes
 
 - `CHECK_SESSION` still exists as legacy/fallback RPC, but Gateway's primary Bearer validation path is `VERIFY_ACCESS_TOKEN`.
 - Password source of truth for login is Tenants `user_identities.passwordHash`; Auth changes tenant user password first and then attempts platform sync.
+- The critical code-audit backlog for Auth is CUC-270..CUC-276, CUC-277..CUC-284, CUC-285..CUC-292, and CUC-293..CUC-300.
 
 ## Examples
 

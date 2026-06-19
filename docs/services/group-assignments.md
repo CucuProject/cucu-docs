@@ -125,6 +125,7 @@ Outbound:
 - Batch replace is delete-plus-insert, not diff-based; a mid-flow error can require retry/reconciliation from the caller.
 - Duplicate inserts are intentionally non-fatal in bulk paths and return/keep existing membership.
 - If `USER_GROUPS_CHANGED` emit fails, GroupAssignments remains authoritative but Users' mirror can be stale.
+- Auth does not subscribe directly to GroupAssignments changes; it depends on Users live group RPCs plus its tenant-scoped group cache. If the cache is not invalidated after membership changes, tokens/session context can carry stale groups until TTL.
 - `getGroupAssignment` may return `null` from the service even though the GraphQL type is non-null in docs/code expectations.
 
 ## Example
@@ -153,6 +154,8 @@ Outbound:
 - The batch update implementation is replace-style delete plus insert, not diff-based.
 - `findById` can return `null`; GraphQL callers should treat missing records carefully.
 - `Group.usageCount` is computed live with `countDocuments`.
+- Replace-style assignment hardening is tracked in CUC-176..CUC-181.
+- Auth group-cache invalidation after membership changes is tracked in CUC-277..CUC-284.
 
 ## Source References
 

@@ -142,6 +142,8 @@ Outbound dependencies:
 
 It returns the highest level found, or `null`.
 
+`HAS_PROJECT_ACCESS` is intentionally narrower: it checks only direct explicit records. It does not include supervisor access, milestone allocation, SUPERADMIN, teams, hierarchies, or future indirect rules.
+
 ### Accessible Project Ids
 
 `GET_ALL_ACCESSIBLE_PROJECT_IDS` includes all implemented sources and returns `{ projectIds, isUnrestricted }`.
@@ -186,6 +188,7 @@ It returns the highest level found, or `null`.
 - `UPDATE_PROJECT_CREATED_BY` during ownership transfer is best effort, so access records can change even when Projects creator metadata sync fails.
 - SUPERADMIN checks fail closed for unrestricted access if Grants/Users lookup fails.
 - `CREATE_OWNER_ACCESS` trusts the Projects-side event/RPC and does not verify project/user existence locally.
+- Projects calls `CREATE_OWNER_ACCESS` after project creation and logs errors without rolling back the already-created project.
 
 ## Example
 
@@ -213,6 +216,9 @@ It returns the highest level found, or `null`.
 - `createOwnerAccess` trusts the caller and does not verify project/user existence.
 - `UPDATE_PROJECT_CREATED_BY` during transfer ownership is best effort; access records may already be changed if that RPC fails.
 - The future generic access model with target/subject types is not implemented here; current code is Project/User only.
+- Explicit-vs-effective access evolution is tracked in CUC-198..CUC-204.
+- `UPDATE_PROJECT_CREATED_BY` reconciliation is tracked in CUC-205..CUC-211.
+- Generic team/subject access is future work, not current ProjectAccess behavior.
 
 ## Source References
 

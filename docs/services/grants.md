@@ -120,6 +120,8 @@ PERMISSIONS_CHANGED { groupIds: [...] }
 
 The event is emitted through the Gateway client configured in the Grants module. Other services listen for this event and invalidate local permission caches.
 
+Field-group synchronization is a separate side effect. `syncFieldGroup()` upserts sibling field permissions from `FIELD_GROUPS`, retries once after 500 ms on failure, then logs the retry failure without persisting a retry job or blocking the original permission mutation.
+
 ## Security Boundary
 
 - RPC calls bypass GraphQL `OperationGuard`; bootstrap-sensitive handlers use `AllowRpcCallers('BOOTSTRAP')`.
@@ -133,6 +135,7 @@ The event is emitted through the Gateway client configured in the Grants module.
 - Permission-cache invalidation is event-driven; if a consumer misses `PERMISSIONS_CHANGED`, stale per-service permission cache may live until its TTL/request lifecycle expires.
 - Gateway schema introspection can fail if Gateway is unavailable or introspection is disabled; that affects admin configurability discovery, not stored grants.
 - Soft-deleted groups plus schema-level unique `name` means group name reuse may fail even when a group is logically deleted.
+- Field-group sibling sync is not transactional with the original permission write; after two failed attempts, sibling permissions can remain inconsistent until manual repair or another write path touches them.
 
 ## Example
 
@@ -164,6 +167,8 @@ The event is emitted through the Gateway client configured in the Grants module.
 - `getCascadeRules` is imported for future backend cascade enforcement but is not used in the reviewed code.
 - `groups.name` is schema-unique while groups are soft-deleted, so name reuse after delete should be treated carefully.
 - Grants is not Project object visibility; keep it separate from ProjectAccess.
+- Permission-cache event reliability is tracked in CUC-277..CUC-284.
+- Field-group sync reliability/reconciliation is tracked in CUC-301..CUC-307.
 
 ## Source References
 

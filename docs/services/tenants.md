@@ -139,6 +139,8 @@ Public signup/check/status endpoints live at the Gateway and proxy to Tenants RP
 8. It marks the tenant `active` and sets the trial expiry.
 9. On failure, it drops created databases, removes the membership, and marks `provisioning_failed`.
 
+The service list used by provisioning is a code-owned allowlist. When new tenant-scoped services are added, the allowlist and service indexes must be updated together or a new tenant can be born without the expected database/index footprint. The current remediation track is CUC-182..CUC-191.
+
 ### Universal Auth
 
 `VERIFY_IDENTITY_PASSWORD` normalizes email, checks lockout, verifies bcrypt password, resets lockout on success, and requires a membership for the requested `tenantSlug`.
@@ -164,6 +166,8 @@ Progressive lockout:
 - Lockout blocks login until `lockoutUntil`, then expired lockout state is reset.
 - Missing/invalid `x-internal-resolve` rejects frontend middleware tenant resolve.
 - Tenant provisioning is synchronous today, so long-running DB/index work sits on the signup RPC path.
+- Existing `user_identities` updated through `UPSERT_USER_IDENTITY` receive membership/platform-admin updates, but the reviewed code does not overwrite password/name/surname for existing identities despite the inline comment.
+- `Tenant.userCount` is a resolver stub returning `0`; it must not be used for billing, limits, or dashboard truth until CUC-192..CUC-197 is implemented.
 
 ## Cache and Audit
 
@@ -204,6 +208,7 @@ Valid `VERIFY_IDENTITY_PASSWORD` response:
 - `Tenant.userCount` returns `0`.
 - Provisioning is synchronous; the code comments call out BullMQ as future work.
 - `settings` is typed as `string` in the schema but provisioning/update paths may treat it as object-shaped metadata; keep docs aligned with runtime behavior until the schema is fixed.
+- Auth password changes sync `user_identities.passwordHash` best effort through `UPDATE_IDENTITY_PASSWORD`; partial password divergence is tracked in CUC-285..CUC-292.
 
 ## Source References
 

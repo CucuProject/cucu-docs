@@ -144,6 +144,8 @@ Outbound:
 - Deactivation/delete is blocked when the user supervises other users.
 - Internal event emissions to downstream services are best effort in several paths; the local user mutation can complete while sync logs an error.
 - `USER_GROUPS_CHANGED` re-reads GroupAssignments; if that lookup fails, `authData.groupIds` mirror can lag the source of truth.
+- Deactivation emits `REVOKE_ALL_SESSIONS` to Auth fire-and-forget. Auth session validation does not re-read the Users active/deleted state, so a missed revoke event can leave active sessions until expiry or manual revocation.
+- Password change writes the legacy `authData.password` mirror through Auth, but login uses Tenants `user_identities.passwordHash`; partial divergence is possible if the later Tenants sync fails.
 
 ## Example
 
@@ -169,6 +171,9 @@ query User($id: String!) {
 - `User.subordinates` has a TODO for DataLoader batching.
 - `authData.groupIds` is a mirror, not the source of truth.
 - `authData.password` remains for compatibility and Auth password-change sync, but login verification is Universal Auth in Tenants.
+- User deactivation/session revocation reliability is tracked in CUC-270..CUC-276.
+- Auth group-cache invalidation and Users mirror consistency are tracked in CUC-277..CUC-284.
+- Password-change atomicity/reconciliation is tracked in CUC-285..CUC-292.
 
 ## Source References
 

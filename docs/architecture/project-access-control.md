@@ -83,7 +83,9 @@ Explicit access is a `ProjectAccess` record stored in the `project-access_{tenan
 
 ### Owner record auto-creation
 
-When a project is created, the Projects service emits `PROJECT_OWNER_CREATED`. The ProjectAccess service listens and automatically creates an `OWNER` record for the creator (`createdBy` field). This record is the canonical source of truth for project ownership.
+When a project is created, the current Projects service calls `CREATE_OWNER_ACCESS` on ProjectAccess after the project document is inserted. ProjectAccess also still handles the historical `PROJECT_OWNER_CREATED` event for backward compatibility. The explicit `OWNER` access record is the access-control source of truth, while `projects.createdBy` remains the project-side owner/provenance field.
+
+Important current behavior: Projects logs `CREATE_OWNER_ACCESS` failures and does not roll back the already-created project. That means owner access can require reconciliation if ProjectAccess is unavailable during project creation.
 
 ### Share API
 

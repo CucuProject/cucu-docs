@@ -26,6 +26,27 @@ This service answers "can this user see or act on this specific Project?" Operat
 - Assert project action permissions by section/action.
 - Filter GraphQL read results by the caller's accessible projects.
 
+## Functional Role
+
+ProjectAccess is the object-visibility layer for Projects. It determines which users can see or act on a specific Project after Grants has already decided whether the operation/field is generally allowed. It is intentionally narrower than the future generic sharing model: current code is Project/User only.
+
+Primary actors:
+
+- Project owners/collaborators sharing projects with users.
+- Supervisors gaining implicit edit access to subordinate-owned projects.
+- Assigned resources gaining viewer access through milestone allocation.
+- SUPERADMIN users receiving unrestricted project access.
+- Projects service creating owner access for new projects.
+- Roadmaps/Milestones/Projects asking for accessible project id sets.
+
+Key enabled flows:
+
+- Owner access creation at project creation time.
+- Share, transfer ownership, revoke access, and list project shares.
+- Effective access checks for project sections/actions.
+- Read filtering for project-access records and consumer project lists.
+- Cycle-safe split between full access (`GET_ALL_ACCESSIBLE_PROJECT_IDS`) and explicit/no-MTR access (`GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS`).
+
 ## Data Model
 
 `projectaccesses` fields:
@@ -157,6 +178,14 @@ It returns the highest level found, or `null`.
 - GraphQL list queries are filtered to projects readable by the caller.
 - `ASSERT_PROJECTS_ACCESS` uses `canProjectRole(level, section, action)` from `@cucu/permission-rules`.
 - `HAS_PROJECT_ACCESS` is explicit-record only; use `GET_PROJECT_ACCESS_LEVEL` for effective access.
+
+## Failure Modes
+
+- Archived projects block access-write mutations even if the caller could otherwise share.
+- `HAS_PROJECT_ACCESS` may return false for a user who has effective supervisor/MTR/SUPERADMIN access; callers needing effective access must use `GET_PROJECT_ACCESS_LEVEL`.
+- `UPDATE_PROJECT_CREATED_BY` during ownership transfer is best effort, so access records can change even when Projects creator metadata sync fails.
+- SUPERADMIN checks fail closed for unrestricted access if Grants/Users lookup fails.
+- `CREATE_OWNER_ACCESS` trusts the Projects-side event/RPC and does not verify project/user existence locally.
 
 ## Example
 

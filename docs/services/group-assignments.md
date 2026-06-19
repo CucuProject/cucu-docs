@@ -21,6 +21,25 @@ The GroupAssignments service owns the tenant-scoped many-to-many relationship be
 - Extend the federated `Group` entity with `usageCount`.
 - Apply operation and field-level permission checks on GraphQL operations.
 
+## Functional Role
+
+GroupAssignments connects People to permission Groups. It is the membership source of truth that makes Grants useful for real users; Users keeps only a synchronized `authData.groupIds` mirror for compatibility and fast Auth/group reads.
+
+Primary actors:
+
+- Permission/People admins assigning users to groups.
+- Users service creating/updating/deleting users with group ids.
+- Grants service creating/updating/deleting groups with user ids.
+- Auth and other consumers indirectly reading group ids through Users.
+
+Key enabled flows:
+
+- Add/remove a user from permission groups.
+- Replace all groups for a user during People update.
+- Replace all users for a group during Grants/admin update.
+- Keep Users group mirror current through `USER_GROUPS_CHANGED`.
+- Show group usage counts in federated Group views.
+
 ## Data Model
 
 `groupassignments` fields:
@@ -100,6 +119,13 @@ Outbound:
 - `findGroupAssignmentsByUserId` supports self-scoped permissions.
 - User/group existence checks are skipped only for internal provisioning/bootstrap style calls.
 - Users is notified after every assignment mutation so its group mirror can stay current.
+
+## Failure Modes
+
+- Batch replace is delete-plus-insert, not diff-based; a mid-flow error can require retry/reconciliation from the caller.
+- Duplicate inserts are intentionally non-fatal in bulk paths and return/keep existing membership.
+- If `USER_GROUPS_CHANGED` emit fails, GroupAssignments remains authoritative but Users' mirror can be stale.
+- `getGroupAssignment` may return `null` from the service even though the GraphQL type is non-null in docs/code expectations.
 
 ## Example
 

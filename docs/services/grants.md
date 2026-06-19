@@ -27,6 +27,26 @@ Grants answers "can this operation or field be used?" Object visibility for indi
 - Invalidate permission caches after changes.
 - Introspect the Gateway schema to list configurable fields, queries, and mutations.
 
+## Functional Role
+
+Grants is the permission control plane for what a user may do or see at operation, field, and page level. It does not decide whether a specific Project object is visible; that belongs to ProjectAccess. Product-wise, Grants powers admin-configurable roles such as SUPERADMIN, TOP_MANAGER, PROJECT_MANAGER, CONSULTANT, and ADMIN.
+
+Primary actors:
+
+- Permission admins configuring groups and grants.
+- Gateway asking for `GET_MY_PERMISSIONS` during login/me.
+- Subgraphs loading field/operation permissions for request-scoped checks.
+- ProjectAccess and other services using group lookups such as SUPERADMIN.
+- Bootstrap seeding base groups and default grants.
+
+Key enabled flows:
+
+- Login/menu shaping through effective permissions and page grants.
+- Resolver operation authorization through `OperationGuard`.
+- Field-level visibility/editability across tenant-aware services.
+- Permission admin UI introspection through Gateway schema queries.
+- Cache invalidation after permission mutations.
+
 ## Data Model
 
 | Collection | Key fields | Index |
@@ -106,6 +126,13 @@ The event is emitted through the Gateway client configured in the Grants module.
 - The local permission cache only trusts `x-user-groups` when Gateway HMAC verification passes.
 - The service does not decode raw bearer JWTs to infer groups.
 - Internal federation calls without user context may resolve to `INTERNAL_CALL`; user-context calls remain permission checked.
+
+## Failure Modes
+
+- Invalid invariant combinations are rejected: `canEdit` cannot exist without `canView`, fixed-scope operations cannot receive arbitrary scopes, and protected operations require SUPERADMIN/bootstrap.
+- Permission-cache invalidation is event-driven; if a consumer misses `PERMISSIONS_CHANGED`, stale per-service permission cache may live until its TTL/request lifecycle expires.
+- Gateway schema introspection can fail if Gateway is unavailable or introspection is disabled; that affects admin configurability discovery, not stored grants.
+- Soft-deleted groups plus schema-level unique `name` means group name reuse may fail even when a group is logically deleted.
 
 ## Example
 

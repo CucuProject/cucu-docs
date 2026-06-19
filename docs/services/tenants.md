@@ -24,6 +24,26 @@ Unlike tenant runtime services, it does not use `TenantDatabaseModule`. It conne
 - Provision initial tenant databases, indexes, base groups, admin user, and identity membership.
 - Provide platform admin checks with `user_identities` as primary and legacy `platform_admins` as fallback.
 
+## Functional Role
+
+Tenants is the platform registry and Universal Auth owner. It answers "which tenants exist, who can log into them, and is this tenant ready to serve traffic?" It is not a normal tenant data service: runtime business data belongs to tenant-scoped services, while Tenants owns the cross-tenant identity and provisioning control plane.
+
+Primary actors:
+
+- New tenant owner signing up through Gateway.
+- Existing user discovering memberships or switching tenant.
+- Platform admin managing tenant lifecycle.
+- Frontend middleware resolving tenant slug to tenant config via internal HTTP.
+- Bootstrap/provisioning flows seeding tenant databases and base permissions.
+
+Key enabled flows:
+
+- Signup/provisioning from public Gateway endpoint to active tenant.
+- Login password/membership verification for Gateway/Auth.
+- Tenant discovery by email for multi-tenant users.
+- Tenant status polling after signup.
+- Platform admin checks using Universal Auth first and legacy admins as fallback.
+
 ## Data Ownership
 
 ### `tenants`
@@ -137,6 +157,14 @@ Progressive lockout:
 - Internal tenant resolve uses timing-safe secret comparison.
 - The service is platform DB scoped; tenant runtime DB work is limited to provisioning.
 
+## Failure Modes
+
+- Signup provisioning failure leaves a tenant record with `status: provisioning_failed`; status polling surfaces the failure while rollback drops DBs created during that provisioning run.
+- Login with valid password but no membership for the requested tenant fails; email identity alone is insufficient.
+- Lockout blocks login until `lockoutUntil`, then expired lockout state is reset.
+- Missing/invalid `x-internal-resolve` rejects frontend middleware tenant resolve.
+- Tenant provisioning is synchronous today, so long-running DB/index work sits on the signup RPC path.
+
 ## Cache and Audit
 
 No domain cache is implemented in the files reviewed. `AUDIT_SERVICE` is registered as a client, but no direct audit event emitters were found in the Tenants files reviewed.
@@ -175,6 +203,7 @@ Valid `VERIFY_IDENTITY_PASSWORD` response:
 - The provisioning service currently creates DBs for a historical subset of tenant services and does not include newer runtime services such as roadmaps, rates, resources, ai-agents, holidays, or milestone-to-resource.
 - `Tenant.userCount` returns `0`.
 - Provisioning is synchronous; the code comments call out BullMQ as future work.
+- `settings` is typed as `string` in the schema but provisioning/update paths may treat it as object-shaped metadata; keep docs aligned with runtime behavior until the schema is fixed.
 
 ## Source References
 

@@ -26,6 +26,24 @@ It is intentionally stateless: it owns no domain database and does not own authe
 - Generate internal federation tokens for gateway-to-subgraph calls without user context.
 - Apply CORS, Helmet, cookie parsing, throttling, introspection controls, and query limits.
 
+## Functional Role
+
+Gateway enables the first mile of every Cucu user journey: tenant discovery, signup, login, tenant switching, session refresh, logout, and all federated GraphQL work after authentication. Product-wise it is the front door, not a domain owner: it decides whether traffic is trusted enough to enter the platform and then forwards the request to the owning service.
+
+Primary actors:
+
+- Browser and API clients using REST auth endpoints and `/graphql`.
+- Frontend middleware reading tenant/auth state through Gateway and Tenants.
+- Auth, Tenants, and Grants as the identity/authorization backplane.
+- Subgraphs receiving only sanitized, signed, Gateway-originated context.
+
+Key enabled flows:
+
+- Login: `Gateway -> Tenants VERIFY_IDENTITY_PASSWORD -> Auth CREATE_AUTHENTICATED_SESSION -> Grants GET_MY_PERMISSIONS`.
+- GraphQL request: `Gateway -> Auth VERIFY_ACCESS_TOKEN -> signed federation headers -> subgraph`.
+- Tenant signup/status: `Gateway -> Tenants SIGNUP_TENANT / GET_TENANT_STATUS`.
+- Force revoke: authenticated Gateway caller plus Grants operation check before Auth session revoke.
+
 ## Trust Boundary
 
 The Gateway is the only public boundary that may create trusted subgraph headers.
@@ -166,6 +184,19 @@ Controllers use `@SkipThrottle` to isolate buckets because Nest throttler v6 app
 - Internal headers are always stripped before trust is created.
 - `inheritAppConfig: false` prevents HTTP/GraphQL guards from leaking onto the Gateway Redis microservice transport.
 - Subgraphs must trust signed Gateway headers, not raw client headers.
+
+## Failure Modes
+
+- Auth unavailable or `VERIFY_ACCESS_TOKEN` failing makes authenticated GraphQL requests anonymous/unauthorized; Gateway does not fall back to trusting JWT payloads locally.
+- Bad refresh cookie on `/auth/refresh` clears auth cookies and returns an unauthenticated result instead of preserving stale state.
+- Tenant provisioning failures are surfaced through `/tenants/status/:id`; Gateway does not repair provisioning.
+- Grants outage during `force-revoke` blocks the privileged operation because the operation permission cannot be proven.
+- Client-supplied internal headers are stripped; injection attempts should be treated as security telemetry, not as valid tenant context.
+
+## Docs vs Code Notes
+
+- Historical Gateway docs that describe `JwtStrategy` plus `CHECK_SESSION` as the primary GraphQL auth path are stale. Current code uses `createJwtAuthMiddleware()` and Auth `VERIFY_ACCESS_TOKEN` before Apollo Gateway handles `/graphql`.
+- Gateway owns REST cookie mechanics and request metadata extraction, but session state and password verification remain in Auth/Tenants.
 
 ## Source References
 

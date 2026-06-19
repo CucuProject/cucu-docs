@@ -27,6 +27,25 @@ It stores sessions in tenant databases and coordinates with Tenants, Users, Gran
 - Apply field-level filtering on `Session`.
 - Emit security audit events for login and token/session anomalies.
 
+## Functional Role
+
+Auth is the session authority for Cucu. It turns a credential that Tenants has already verified into a server-side session, access token, refresh token, and tenant-scoped identity context. It also owns the security response when a token/session looks suspicious.
+
+Primary actors:
+
+- Gateway, which calls Auth for login/session lifecycle and access-token validation.
+- End users managing sessions, logout, and password changes through GraphQL/REST.
+- Tenants, which owns Universal Auth identities and membership checks.
+- Users, which supplies group ids and receives password-hash updates.
+- Audit, which receives login and token anomaly events.
+
+Key enabled flows:
+
+- Login session creation/reuse after Gateway verifies password with Tenants.
+- Access-token validation for every authenticated Gateway GraphQL request.
+- Refresh rotation with reuse detection, device fingerprint checks, and idle/max-age enforcement.
+- Password change with tenant DB update, best-effort platform identity sync, session revocation, and group-cache invalidation.
+
 ## Main Modules
 
 | Module/File | Purpose |
@@ -187,6 +206,19 @@ TTL is 3600 seconds. Tenant slug is part of the key to avoid cross-tenant pollut
 - Group ids are runtime claims, not the source of truth.
 - GraphQL session fields are filtered through field-level grants.
 - RPC DTOs are validated with formal DTO classes.
+
+## Failure Modes
+
+- Refresh-token hash mismatch is treated as token reuse: Auth revokes the session, emits `TOKEN_REUSE_DETECTED`, and rejects the refresh.
+- Device fingerprint mismatch blocks refresh and emits `DEVICE_FINGERPRINT_MISMATCH`.
+- Idle timeout or max session age revokes the session during refresh/validation.
+- `GET_MY_PERMISSIONS` or membership enrichment failures degrade `/auth/me`/refresh enrichment but do not make Gateway trust unvalidated tokens.
+- Platform DB password sync during `changePassword` is best effort; tenant `users` update and session revocation are the blocking path.
+
+## Docs vs Code Notes
+
+- `CHECK_SESSION` still exists as legacy/fallback RPC, but Gateway's primary Bearer validation path is `VERIFY_ACCESS_TOKEN`.
+- Password source of truth for login is Tenants `user_identities.passwordHash`; Auth changes tenant user password first and then attempts platform sync.
 
 ## Examples
 

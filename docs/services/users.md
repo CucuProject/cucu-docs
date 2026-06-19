@@ -26,6 +26,26 @@ It is also a synchronization point for Resources, GroupAssignments, MilestoneToR
 - Event emission to `group-assignments`, `milestone-to-resource`, `resources`, and `auth`.
 - RPC support for Auth, ProjectAccess, Rates, Organization, and Bootstrap.
 
+## Functional Role
+
+Users is the People profile and employment owner. It gives the rest of Cucu a tenant-scoped person/resource identity: who the user is, whether they are active, which organizational attributes they carry, which capacity periods apply, and how supervisor relationships affect access.
+
+Primary actors:
+
+- People admins creating, updating, deactivating, restoring, or deleting users.
+- Users reading their own profile/session-visible fields.
+- Auth loading group ids and password hashes for session/password flows.
+- ProjectAccess resolving supervisor/subordinate access.
+- Resources/Rates/MilestoneToResource consuming capacity and role/seniority context.
+
+Key enabled flows:
+
+- People list/filter management for operational staffing.
+- User create/update sync to GroupAssignments and Resources.
+- User deactivation revoking Auth sessions.
+- Supervisor-chain and subordinate queries for ProjectAccess effective visibility.
+- Rate context and basic user/capacity reads for planning and economics.
+
 ## Data Model
 
 `User` is stored in `users` with nested subdocuments:
@@ -117,6 +137,14 @@ Outbound:
 - Capacity periods must be date-only, non-overlapping, max 24 entries, and use daily hours between 0 and 24.
 - Supervisor traversal uses visited sets to avoid infinite loops.
 
+## Failure Modes
+
+- Duplicate active email fails through the unique email/deletedAt index.
+- Updates that try to write `authData.password` through ordinary People flows are rejected; password change is Auth-owned.
+- Deactivation/delete is blocked when the user supervises other users.
+- Internal event emissions to downstream services are best effort in several paths; the local user mutation can complete while sync logs an error.
+- `USER_GROUPS_CHANGED` re-reads GroupAssignments; if that lookup fails, `authData.groupIds` mirror can lag the source of truth.
+
 ## Example
 
 ```graphql
@@ -137,9 +165,10 @@ query User($id: String!) {
 
 ## Notes and Risks
 
-- Older docs referenced `milestone-to-resource` and `MilestoneToResource`; the current code uses `milestone-to-resource` and `MilestoneToResource`.
+- Older docs referenced `milestone-to-user`/`MilestoneToUser`; the current code uses `milestone-to-resource` and `MilestoneToResource`.
 - `User.subordinates` has a TODO for DataLoader batching.
 - `authData.groupIds` is a mirror, not the source of truth.
+- `authData.password` remains for compatibility and Auth password-change sync, but login verification is Universal Auth in Tenants.
 
 ## Source References
 

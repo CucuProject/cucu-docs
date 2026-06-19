@@ -47,6 +47,13 @@ Inbound events:
 - Roadmap/Release writes are owner-only.
 - Reads are owner or derived from at least one visible project commitment.
 - Metadata must fail closed if ProjectAccess cannot verify project visibility.
+- Internal calls without user context bypass object-access filtering; user-context calls remain filtered.
+
+## Failure Modes
+
+- `getAccessibleProjectSnapshot()` returns an empty restricted set when ProjectAccess fails, so non-owner reads lose derived visibility instead of leaking Roadmaps/Releases.
+- Roadmap and Release writes do not currently use a generic sharing model. Owner-only write semantics are code-current, not just product policy.
+- Release/project reorders are `Promise.all` updates across multiple rows, not a single multi-document transaction.
 
 ## Commercial Boundary
 

@@ -8,6 +8,7 @@ Holidays owns holiday calendars, company closures, user absences, and business-d
 - Exposes GraphQL for calendars, country options, closures, and absences.
 - Exposes RPC for capacity/business-day consumers.
 - Seeds built-in holiday calendars.
+- Stores national holiday calendars in a shared database and company closures/user absences in tenant databases.
 
 ## GraphQL Surface
 
@@ -29,6 +30,13 @@ Inbound RPC:
 Inbound events:
 
 - `PERMISSIONS_CHANGED`
+
+## Failure Modes
+
+- National holidays are shared platform data, not tenant-scoped records. Tenant-specific closure/absence data still routes through tenant DB.
+- User absence and company closure writes do not validate source User/Company existence in the reviewed service code.
+- Recurring company closures are matched by month-day. Cross-year ranges are handled manually and should be tested before relying on unusual fiscal-calendar ranges.
+- Consumers such as Milestone to Resource may catch Holidays RPC failures and treat the result as no holidays, so allocation day-off enforcement depends on consumer fail policy too.
 
 ## Boundaries
 

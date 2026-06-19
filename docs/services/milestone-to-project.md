@@ -49,6 +49,13 @@ Inbound events:
 
 Milestone visibility inherits from Project visibility. Planned-date and archive guards pass through this service so Milestones does not couple directly to Projects.
 
+## Failure Modes
+
+- Project and Milestone lifecycle handling is event-driven. Missed `PROJECT_*` or `MILESTONE_*` events can leave join rows stale until a repair/backfill runs.
+- `updateAssignmentsForProject()` and `updateMilestoneToProjectForProject()` use replace-style `deleteMany` followed by create/insert, not a diff transaction. A failure between delete and reinsert can temporarily remove links.
+- Access filtering uses `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` to avoid ProjectAccess/MTR recursion. If ProjectAccess fails, reads return an empty accessible set rather than broadening visibility.
+- `EXTEND_ACTIVE_MILESTONE_TO_PROJECT_END_DATE` only extends when the linked project is `ACTIVE`; it returns `null` for non-active projects and rejects archived projects.
+
 ## Boundaries
 
 This service must remain a join service. It does not own allocation, cost, user/resource, or Project access.

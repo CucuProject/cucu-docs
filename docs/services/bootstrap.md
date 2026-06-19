@@ -9,6 +9,7 @@ Bootstrap is a one-shot application context for tenant provisioning and seed dat
 - Calls other services through Redis RPC.
 - Passes `_tenantSlug` for tenant-scoped operations.
 - Runs as provisioning/seed orchestration, not as a domain service.
+- Waits for Redis/dependency readiness through the orchestrator before running seeders.
 
 ## GraphQL and RPC Surface
 
@@ -31,3 +32,10 @@ Bootstrap calls many services, including:
 ## Boundaries
 
 Bootstrap owns no runtime data. It should stay idempotent and explicit. Do not hide domain logic in bootstrap seeders.
+
+## Failure Modes
+
+- Bootstrap is a one-shot application context and calls `process.exit(0|1)` after completion/failure.
+- A top-level seeder failure aborts the process with exit code `1`; there is no persisted bootstrap run report in the reviewed code.
+- Several seeder internals catch missing optional records and continue, so a successful process exit does not by itself prove every optional demo/enrichment artifact was created.
+- Bootstrap must not become the only place where domain invariants live; runtime services still need to validate their own contracts.

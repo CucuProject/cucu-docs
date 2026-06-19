@@ -21,3 +21,9 @@ The payload contains event type, severity, optional user/session/tenant/ip/email
 ## Boundaries
 
 Audit is not tenant-db routed. `tenantSlug` is a field for correlation, not database selection. Producer failures and audit sink failures must remain decoupled: audit persistence should not break business flows.
+
+## Failure Modes
+
+- `AuditService.logEvent()` catches persistence errors, logs them, and does not throw. Audit loss is possible if the central audit database is unavailable.
+- Audit exposes no query/read API in the reviewed code; retention, export, search, and operational reporting are outside the current service surface.
+- Producers remain responsible for emitting meaningful `type`, `severity`, actor, tenant, and metadata fields.

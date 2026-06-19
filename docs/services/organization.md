@@ -41,6 +41,13 @@ Inbound events:
 
 - `PERMISSIONS_CHANGED`
 
+## Failure Modes
+
+- Usage-count resolver fields catch Users RPC failures and return `0`; this is a display fallback, not proof that an entity is unused.
+- Delete guards for Company, JobRole, and SeniorityLevel call Users usage-count RPC without swallowing errors. If Users is unavailable, deletion fails rather than risking orphaned references.
+- RoleCategory delete currently only soft-deletes the role category; it does not perform the same Users-backed guard because role usage is through JobRole.
+- JobRole usage breakdown combines Users usage and SeniorityLevel references; RPC failure returns a zero breakdown.
+
 ## Boundaries
 
 Organization does not own employment history, team membership, org chart, rates, costs, or object access. RoleCategory and JobRole are not a substitute for teams.

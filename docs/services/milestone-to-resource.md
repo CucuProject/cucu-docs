@@ -10,6 +10,7 @@ Milestone to Resource owns assignment and allocation between milestones and reso
 - Provides resource availability and aggregated allocation surfaces.
 - Feeds implicit Project visibility checks through ProjectAccess.
 - Freezes and clears project economic snapshots.
+- Enforces allocation guards for archived projects, weekends, holidays, date windows, and user capacity where dependency data is available.
 
 ## GraphQL Surface
 
@@ -50,6 +51,15 @@ Inbound RPC:
 Outbound RPC:
 
 - `EXTEND_ACTIVE_MILESTONE_TO_PROJECT_END_DATE`
+
+## Failure Modes
+
+- Batch assignment update paths still use replace-style `deleteMany` plus insert for user and milestone contexts.
+- Access filters use `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS`; if ProjectAccess/M2P lookup fails, reads fail closed to empty sets.
+- Holiday checks can degrade open: failures resolving M2P, Project country, or Holidays calendars are caught and treated as no holidays.
+- Capacity checks can degrade open: failure fetching Users capacity data returns an empty capacity map, which leaves the default per-user capacity guard ineffective for that batch.
+- Economic snapshot freezing is blocking for active-project allocation writes. Missing rate/cost data produces `INCOMPLETE` snapshots; invalid resolver shape or missing project context throws and blocks the operation.
+- Snapshot reads in Rates distinguish `LIVE`, `FROZEN`, and `PARTIAL`; incomplete snapshots still contribute zero for missing rate/cost amounts.
 
 ## Boundaries
 

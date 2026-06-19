@@ -42,6 +42,7 @@ export default defineConfig({
             { text: 'Permission System', link: '/architecture/permissions' },
             { text: 'Service Startup', link: '/architecture/startup' },
             { text: 'Project Access Control', link: '/architecture/project-access-control' },
+            { text: 'Event Reliability', link: '/architecture/event-side-effect-reliability' },
           ]
         },
         {

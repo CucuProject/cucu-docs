@@ -119,7 +119,7 @@ flowchart TD
         PROJECTS[Projects :3003]
         HOLIDAYS[Holidays :3013]
         GA[GroupAssignments :3007]
-        M2U[MilestoneToUser :3005]
+        MTR[MilestoneToResource :3005]
         M2P[MilestoneToProject :3006]
         PA[ProjectAccess :3008]
     end
@@ -134,7 +134,7 @@ flowchart TD
     
     REDIS --> TENANTS & GRANTS & ORG
     TENANTS & GRANTS --> AUTH & USERS
-    USERS & MILESTONES --> M2U & M2P & GA
+    USERS & MILESTONES --> MTR & M2P & GA
     ALL --> GW
     GW --> BOOTSTRAP
 ```

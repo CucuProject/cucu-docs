@@ -101,7 +101,7 @@ Each service owns its data and database:
 Services reference entities from other services using **Apollo Federation**:
 
 ```typescript
-// In milestone-to-user service: User stub
+// In milestone-to-resource service: User stub
 @ObjectType()
 @Directive('@extends')
 @Directive('@key(fields: "_id")')

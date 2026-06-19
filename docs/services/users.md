@@ -137,7 +137,7 @@ query User($id: String!) {
 
 ## Notes and Risks
 
-- Older docs referenced `milestone-to-user` and `MilestoneToUser`; the current code uses `milestone-to-resource` and `MilestoneToResource`.
+- Older docs referenced `milestone-to-resource` and `MilestoneToResource`; the current code uses `milestone-to-resource` and `MilestoneToResource`.
 - `User.subordinates` has a TODO for DataLoader batching.
 - `authData.groupIds` is a mirror, not the source of truth.
 

@@ -659,7 +659,7 @@ Every backend microservice depends on `@cucu/service-common`. Here's how each se
 | **projects** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard` | Project management |
 | **milestones** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard` | Milestone management |
 | **milestone-to-project** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `RpcInternalGuard` | Junction service: milestone ↔ project |
-| **milestone-to-user** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `RpcInternalGuard` | Junction service: milestone ↔ user |
+| **milestone-to-resource** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `RpcInternalGuard` | Junction service: milestone ↔ user |
 | **project-access** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard` | Project access control |
 | **holidays** | `createSubgraphMicroservice`, `BaseSubgraphContext`, `TenantAwareClientsModule`, `OperationGuard`, `PlatformAdminGuard` | Holiday calendars, company closures, user absences |
 

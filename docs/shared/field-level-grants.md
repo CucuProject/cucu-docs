@@ -215,7 +215,7 @@ graph LR
 | **group-assignments** | `LocalSchemaFieldsService` for entity introspection |
 | **milestones** | `LocalSchemaFieldsService` for Milestone entity fields |
 | **milestone-to-project** | `LocalSchemaFieldsService` for junction entity fields |
-| **milestone-to-user** | `LocalSchemaFieldsService` for junction entity fields |
+| **milestone-to-resource** | `LocalSchemaFieldsService` for junction entity fields |
 | **organization** | `LocalSchemaFieldsService` for Company/JobRole/SeniorityLevel fields |
 | **projects** | `LocalSchemaFieldsService` for Project/ProjectTemplate fields |
 | **project-access** | `LocalSchemaFieldsService` for ProjectAccess entity fields |

@@ -1,181 +1,51 @@
 # Projects Service
 
-The Projects service manages **projects**, **project templates**, **template phases**, and **template sharing**. It's one of the richer services with multiple sub-domains.
+Projects owns the Project operational record: project CRUD, status lifecycle, project templates, template phases/shares, Gantt read model, and initial owner-access creation.
 
-## Overview
+## Runtime Role
 
-| Property | Value |
-|----------|-------|
-| Port | 3003 |
-| Database | `projects_{tenantSlug}` |
-| Collections | `projectdocuments`, `projecttemplates`, `projecttemplatephases`, `projecttemplateshares` |
-| Module | `ProjectsModule` |
-| Context | `ProjectsContext` (request-scoped) |
+- Owns `Project`, `ProjectTemplate`, `ProjectTemplatePhase`, and `ProjectTemplateShare`.
+- Resolves `Project.milestones` through Milestone to Project.
+- Emits `PROJECT_CREATED`, `PROJECT_UPDATED`, and `PROJECT_DELETED` to Milestone to Project.
+- Calls `CREATE_OWNER_ACCESS` on ProjectAccess after project creation.
+- Exposes `ganttProject`, but does not own milestone allocation or economics.
 
-## Schemas
+## GraphQL Surface
 
-### Project
+- Project: `findAllProjects`, `findOneProject`, `ganttProject`, `createProject`, `updateProject`, `removeProject`.
+- Templates: `findAllProjectTemplates`, `findOneProjectTemplate`, `createProjectTemplate`, `updateProjectTemplate`, `deleteProjectTemplate`, `shareProjectTemplate`, `unshareProjectTemplate`.
+- Phases: `findPhasesByTemplate`, `createProjectTemplatePhase`, `updateProjectTemplatePhase`, `deleteProjectTemplatePhase`.
 
-```typescript
-@Directive('@key(fields: "_id")')
-class Project {
-  _id: string
-  projectBasicData: ProjectBasicData {
-    name: string
-    description: string
-    startDate: string
-    endDate: string
-    status: ProjectStatus        // ACTIVE | COMPLETED | ON_HOLD | ARCHIVED
-    excludeWeekends: boolean     // default: false
-    countryCode?: string         // ISO 3166-1 alpha-2 for holiday calendar lookup
-  }
-  createdBy?: string             // userId of the creator — set automatically on creation, nullable for pre-existing data
-  milestones?: MilestoneToProject[]  // Federation
-  tenantId?: string
-  deletedAt?: Date
-}
+## RPC and Events
 
-// Indexes: name+deletedAt, status+deletedAt, startDate+deletedAt, endDate+deletedAt, deletedAt
-```
+Inbound RPC:
 
-### ProjectTemplate
+- `PROJECT_EXISTS`
+- `GET_PROJECT_DATES`
+- `FIND_PROJECT_BY_NAME`
+- `CREATE_PROJECT`
+- `GET_PROJECT_CREATED_BY`
+- `GET_PROJECT_IDS_BY_CREATOR`
+- `UPDATE_PROJECT_CREATED_BY`
+- `GET_PROJECTS_STATUS`
+- `GET_PROJECTS_SUMMARY`
+- template seed/create/find/delete patterns
 
-```typescript
-class ProjectTemplate {
-  _id: string
-  name: string
-  description?: string
-  scope: ProjectTemplateScope    // SYSTEM | PRIVATE | SHARED
-  createdBy?: string             // User ID who created the template
-  phases?: ProjectTemplatePhase[]  // Resolved via ResolveField
-  shares?: ProjectTemplateShare[]  // Resolved via ResolveField
-}
-```
+Inbound events:
 
-### ProjectTemplatePhase
+- `PERMISSIONS_CHANGED`
 
-```typescript
-class ProjectTemplatePhase {
-  _id: string
-  templateId: string
-  name: string
-  orderIndex: number
-  isRequired: boolean
-  percentage?: number            // % of project effort
-  roleCategoryId?: string        // → RoleCategory (organization)
-}
-```
+Outbound:
 
-## GraphQL Schema
+- `CREATE_OWNER_ACCESS`
+- `PROJECT_CREATED`
+- `PROJECT_UPDATED`
+- `PROJECT_DELETED`
 
-### Project Queries & Mutations
+## Access Rules
 
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllProjects` | Query | `pagination?, filter?: ProjectFilterInput, sort?` | `PaginatedProjects!` |
-| `findOneProject` | Query | `projectId: ID!` | `Project!` |
-| `createProject` | Mutation | `createProjectInput` | `Project!` |
-| `updateProject` | Mutation | `updateProjectInput` | `Project!` |
-| `removeProject` | Mutation | `projectId: ID!` | `DeleteProjectOutput!` |
+Project visibility is object access, not grants membership. `findAllProjects`, `findOneProject`, update, and remove verify object access server-side. `ARCHIVED` projects block ordinary update/delete, except status-only reactivation.
 
-### Template Queries & Mutations
+## Boundaries
 
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllProjectTemplates` | Query | `scope?: ProjectTemplateScope` | `[ProjectTemplate]!` |
-| `findOneProjectTemplate` | Query | `templateId: ID!` | `ProjectTemplate!` |
-| `createProjectTemplate` | Mutation | `input` | `ProjectTemplate!` |
-| `updateProjectTemplate` | Mutation | `input` | `ProjectTemplate!` |
-| `deleteProjectTemplate` | Mutation | `templateId: ID!` | `DeleteProjectTemplateOutput!` |
-| `shareProjectTemplate` | Mutation | `input: ShareProjectTemplateInput!` | `[ProjectTemplateShare]!` |
-| `unshareProjectTemplate` | Mutation | `input: UnshareProjectTemplateInput!` | `Boolean!` |
-
-### Phase Queries & Mutations
-
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findPhasesByTemplate` | Query | `templateId: ID!` | `[ProjectTemplatePhase]!` |
-| `createProjectTemplatePhase` | Mutation | `input` | `ProjectTemplatePhase!` |
-| `updateProjectTemplatePhase` | Mutation | `input` | `ProjectTemplatePhase!` |
-| `deleteProjectTemplatePhase` | Mutation | `phaseId: ID!` | `DeleteProjectTemplateOutput!` |
-
-### ResolveField
-
-| Field | On | Returns | Description |
-|-------|-----|---------|-------------|
-| `milestones` | `Project` | `[MilestoneToProject]` | Via `FIND_MILESTONE_TO_PROJECT_BY_PROJECT_ID` RPC |
-| `phases` | `ProjectTemplate` | `[ProjectTemplatePhase]` | Direct DB query |
-| `shares` | `ProjectTemplate` | `[ProjectTemplateShare]` | Direct DB query |
-
-## RPC Patterns
-
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `PROJECT_EXISTS` | `string \| {id}` | `boolean` | Check existence |
-| `GET_PROJECT_DATES` | `string` | `{startDate, endDate}` | Get project date range |
-| `FIND_PROJECT_BY_NAME` | `string` | `Project \| null` | Find by name (bootstrap) |
-| `CREATE_PROJECT` | `{projectBasicData, assignedMilestoneIds?}` | `Project` | Create (bootstrap) |
-| `CREATE_PROJECT_TEMPLATE` | `{name, description?, scope, createdBy?}` | `ProjectTemplate` | Create template (bootstrap) |
-| `FIND_PROJECT_TEMPLATE_BY_NAME` | `string` | `ProjectTemplate \| null` | Find template (bootstrap) |
-| `FIND_TEMPLATE_PHASES_BY_TEMPLATE_ID` | `string` | `ProjectTemplatePhase[]` | Get phases (bootstrap) |
-| `CREATE_PROJECT_TEMPLATE_PHASE` | `{templateId, name, orderIndex, ...}` | `ProjectTemplatePhase` | Create phase (bootstrap) |
-| `SEED_PROJECT_TEMPLATES` | — | `void` | Trigger template seeding (called by bootstrap) |
-| `GET_PROJECTS_STATUS` | `{ ids: string[] }` | `Array<{ projectId: string, status: string }>` | Batch status check (returns `NOT_FOUND` for missing IDs) |
-| `GET_PROJECT_CREATED_BY` | `{projectId: string}` | `{createdBy: string\|null}` | Get the userId of the project creator |
-| `GET_PROJECT_IDS_BY_CREATOR` | `{userIds: string[]}` | `string[]` | Get all project IDs where `createdBy` is in the given user list |
-| `UPDATE_PROJECT_CREATED_BY` | `{projectId: string, newCreatedBy: string}` | `void` | Update the `createdBy` field — called by project-access during ownership transfer |
-
-### Outbound Events
-
-| Target | Pattern | When |
-|--------|---------|------|
-| MilestoneToProject | `PROJECT_CREATED` | After project creation |
-| MilestoneToProject | `PROJECT_UPDATED` | After project update |
-| MilestoneToProject | `PROJECT_DELETED` | After project deletion |
-
-## Access Control
-
-### On Project Creation
-
-When a project is created, the Projects service emits a `PROJECT_OWNER_CREATED` event to the ProjectAccess service with `{projectId, userId}`. ProjectAccess automatically creates an `OWNER` record for the creator. This means `createdBy` and the owner in project-access always start as the same user.
-
-### Query Filtering
-
-- **`findAllProjects`** — filters the result to only include projects the requesting user can access. Internally calls `GET_ALL_ACCESSIBLE_PROJECT_IDS` on the ProjectAccess service.
-- **`findOneProject`** — after fetching the project, checks the user's access level via `GET_PROJECT_ACCESS_LEVEL`. Throws `ForbiddenException` if the level is `null`.
-
-### Write Guards
-
-- **`update()`** — requires at least `editor` level on the project. Users with only `viewer` access receive `ForbiddenException`.
-- **`remove()`** — requires at least `editor` level on the project.
-
-## ARCHIVED Project Rules
-
-When a project's status is `ARCHIVED`:
-
-- **`update()`** — blocked with `BadRequestException` unless the update is a status-only change back to `ACTIVE`. All other field changes are rejected.
-- **`remove()`** — blocked with `BadRequestException`. An ARCHIVED project cannot be deleted.
-
-These guards are enforced in the Projects service resolver before any DB write.
-
-## Template Seeding
-
-The `seedTemplates()` function is now exposed as a `SEED_PROJECT_TEMPLATES` RPC endpoint. The Bootstrap service calls this RPC per tenant to seed default project templates:
-
-```typescript
-@MessagePattern('SEED_PROJECT_TEMPLATES')
-async seedProjectTemplates() {
-  await this.projectTemplateService.seedTemplates();
-}
-```
-
-This change allows template seeding to run with proper tenant context, rather than requiring `onModuleInit` to guess the tenant.
-
-### Template Visibility
-
-Templates have three scopes:
-- **SYSTEM** — visible to all users (seeded at startup)
-- **PRIVATE** — visible only to the creator
-- **SHARED** — visible to specific users/groups via `ProjectTemplateShare`
-
-The `findAllProjectTemplates` resolver filters by scope, `currentUserId`, and group memberships.
+Projects does not own milestones, resource allocation, rate/cost data, or the access graph. `createdBy` is provenance; ProjectAccess is the object visibility and role model.

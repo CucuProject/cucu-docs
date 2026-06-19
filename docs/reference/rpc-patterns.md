@@ -154,12 +154,12 @@ Complete catalog of all RPC message and event patterns in the Cucu platform.
 | `DELETE_MILESTONE` | Message | `milestoneId: string` | `Milestone` |
 | `PERMISSIONS_CHANGED` | Event | `{ groupIds }` | N/A |
 
-## MilestoneToUser Service
+## MilestoneToResource Service
 
 | Pattern | Type | Payload | Response |
 |---------|------|---------|----------|
-| `FIND_MILESTONE_TO_USER_BY_USER_ID` | Message | `userId: string` | `MilestoneToUser[]` |
-| `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | Message | `milestoneId: string` | `MilestoneToUser[]` |
+| `FIND_MILESTONE_TO_RESOURCE_BY_USER_ID` | Message | `userId: string` | `MilestoneToResource[]` |
+| `FIND_MILESTONE_TO_RESOURCE_BY_MILESTONE_ID` | Message | `milestoneId: string` | `MilestoneToResource[]` |
 | `USER_CREATED` | Event | `{ userId, assignedMilestoneIds?, assignmentStartDates?, assignmentEndDates? }` | N/A |
 | `USER_UPDATED` | Event | `{ userId, assignedMilestoneIds?, assignmentStartDates?, assignmentEndDates? }` | N/A |
 | `USER_DELETED` | Event | `{ userId }` | N/A |
@@ -209,7 +209,7 @@ These events are broadcast to all services that need to invalidate permission ca
 - Organization
 - Projects
 - Milestones
-- MilestoneToUser
+- MilestoneToResource
 - MilestoneToProject
 - ProjectAccess
 
@@ -382,7 +382,7 @@ const permissions = await lastValueFrom(
 ### User Creation Flow
 
 ```
-Users Service                GroupAssignments Service         MilestoneToUser Service
+Users Service                GroupAssignments Service         MilestoneToResource Service
      │                              │                                │
      │  emit('USER_CREATED',        │                                │
      │  { userId, groupIds,         │                                │
@@ -393,7 +393,7 @@ Users Service                GroupAssignments Service         MilestoneToUser Se
      │                              │                                │
      │──────────────────────────────┼───────────────────────────────►│
      │                              │                                │
-     │                              │         Creates MilestoneToUser│
+     │                              │         Creates MilestoneToResource│
      │                              │         records for each       │
      │                              │         milestoneId            │
 ```

@@ -1,94 +1,61 @@
 # Rates Service
 
-The rates microservice manages rate levels with a 5-level inheritance cascade. Each level can have multiple rates with validity periods (effective dating).
+Rates owns rate/cost rules, resolution, and project economics read models.
 
-## Rate Cascade: `resolveRate`
+## Runtime Role
 
-The `resolveRate` function resolves the effective rate for a given context. Each level is checked only if the corresponding parameter is provided. **First match wins.**
+- Owns `Rate` and `Cost`.
+- Resolves rates and costs by specificity and effective dates.
+- Exposes project cost summary and economic snapshot views.
+- Uses Milestone to Resource assignment/allocation details for project economics.
+- Uses frozen snapshots when available to avoid retroactive economics drift.
 
-```
-1. project-user     (projectId + userId)          → most specific
-2. user             (userId)
-3a. seniorityLevel + jobRoleId (specific cross)
-3b. seniorityLevel  (generic, no jobRoleId)
-4. jobRole          (jobRoleId)
-5. roleCategory     (roleCategoryId)               → least specific
-```
+## GraphQL Surface
 
-**Temporal filter** (same for all levels):
-```
-validFrom <= date  AND  (validTo IS NULL OR validTo >= date)
-```
-`date` defaults to today.
+Rates:
 
-### Example
+- `getRates`
+- `getRatesForScope`
+- `getRate`
+- `resolveRate`
+- `resolveMatrixRate`
+- `projectCostSummary`
+- `projectEconomicSnapshot`
+- `createRate`
+- `updateRate`
+- `deleteRate`
 
-A user with:
-- seniorityLevel = "Senior" (rate: €80/day)
-- jobRole = "Developer" (rate: €100/day)
+Costs:
 
-Query: `resolveRate({ userId: "...", jobRoleId: "...", seniorityLevelId: "..." })`
+- `getCosts`
+- `getCostsForScope`
+- `getCost`
+- `resolveCost`
+- `createCost`
+- `updateCost`
+- `deleteCost`
 
-Result: level 3a matches (seniorityLevel + jobRoleId cross) → €100/day. The jobRole rate (level 4) and seniorityLevel generic rate (level 3b) are skipped because 3a matched first.
+## RPC and Events
 
-## Rate Entity
+Inbound RPC:
 
-```typescript
-Rate {
-  targetType: 'roleCategory' | 'jobRole' | 'seniorityLevel' | 'user' | 'project-user'
-  targetId: string           // ObjectId of the target entity
-  projectId?: string         // only for targetType='project-user'
-  jobRoleId?: string         // only for targetType='seniorityLevel' (cross-level)
-  amount: number             // Float, >= 0
-  currency: string           // default 'EUR'
-  validFrom: string          // ISO date YYYY-MM-DD
-  validTo?: string           // null = still active (open-ended)
-}
-```
+- `CREATE_RATE`
+- `RESOLVE_RATE`
+- `RESOLVE_RATES_BATCH`
+- `GET_RATES_FOR_TARGET`
+- `CREATE_COST`
+- `RESOLVE_COST`
+- `RESOLVE_COSTS_BATCH`
+- `GET_COSTS_FOR_TARGET`
 
-## RPC Patterns
+Inbound events:
 
-| Pattern | Payload | Returns |
-|---------|---------|---------|
-| `RESOLVE_RATE` | `{ userId?, projectId?, jobRoleId?, seniorityLevelId?, date? }` | `{ amount, currency, source, rateId }` |
-| `RESOLVE_RATES_BATCH` | `{ items: [...same as above] }` | `[{ amount, currency, source, rateId }]` |
-| `GET_RATES_FOR_TARGET` | `{ targetType, targetId }` | `Rate[]` |
-| `CREATE_RATE` | `{ targetType, targetId, amount, currency, validFrom, ... }` | `Rate` |
+- `PERMISSIONS_CHANGED`
 
-## User Integration
+## Access Rules
 
-The users service exposes `employmentData.rates` as a `@ResolveField` that calls `RESOLVE_RATE` via RPC:
+Rates/costs are economics-sensitive. Keep operation and field grants explicit. Do not expose commercial or cost data through unrelated service surfaces.
 
-```graphql
-query {
-  findOneUser(userId: "...") {
-    employmentData {
-      rates {       # ResolvedRate type
-        amount
-        currency
-        source      # which level resolved the rate
-      }
-    }
-  }
-}
-```
+## Boundaries
 
-The `source` field indicates which cascade level provided the rate (e.g., `"user"`, `"jobRole"`, `"seniorityLevel"`).
-
-## Currency Conversion
-
-The rates service includes a `CurrencyConverter` that converts rates to EUR using the Frankfurter API (ECB rates). Stored rates can be in any currency; `resolveRate` always returns amounts in the rate's original currency.
-
-## Overlap Validation
-
-Rates for the same target cannot have overlapping validity periods. The `CREATE_RATE` and `UPDATE_RATE` mutations validate:
-```
-NOT (existing.validFrom < new.validTo AND new.validFrom < existing.validTo)
-```
-
-## Settings FE Integration
-
-The settings pages (`/setup/settings/rates`, `/setup/settings/job-roles`, `/setup/settings/seniority`) show inline rate editing with:
-- `RateInline` component for single-rate display/edit
-- Cascading rate display (what the rate would be for a given context)
-- Inherited rate visualization with source indicator
+Rates does not own allocation, resource catalog, or organization lookup data. It consumes those domains for resolution and summaries.

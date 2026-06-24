@@ -17,7 +17,7 @@ export function getSubgraphs(configService: ConfigService) {
     { nameKey: 'PROJECTS_SERVICE_NAME', ... },
     { nameKey: 'GRANTS_SERVICE_NAME', ... },
     { nameKey: 'GROUP_ASSIGNMENTS_SERVICE_NAME', ... },
-    { nameKey: 'MILESTONE_TO_USER_SERVICE_NAME', ... },
+    { nameKey: 'MILESTONE_TO_RESOURCE_SERVICE_NAME', ... },
     { nameKey: 'MILESTONE_TO_PROJECT_SERVICE_NAME', ... },
     { nameKey: 'PROJECT_ACCESS_SERVICE_NAME', ... },
     { nameKey: 'ORGANIZATION_SERVICE_NAME', ... },
@@ -56,7 +56,7 @@ Each entity is owned by exactly one service (marked with `@Directive('@key(field
 | `PagePermission` | grants | `_id` |
 | `GroupAssignment` | group-assignments | `_id` |
 | `Milestone` | milestones | `_id` |
-| `MilestoneToUser` | milestone-to-user | `_id` |
+| `MilestoneToResource` | milestone-to-resource | `_id` |
 | `MilestoneToProject` | milestone-to-project | `_id` |
 | `Project` | projects | `_id` |
 | `ProjectTemplate` | projects | `_id` |
@@ -70,7 +70,7 @@ Each entity is owned by exactly one service (marked with `@Directive('@key(field
 | `CompanyClosure` | holidays | `_id` |
 | `UserAbsence` | holidays | `_id` |
 | `Tenant` | tenants | `_id` |
-| `ResourceDailyAllocation` | milestone-to-user | `_id` |
+| `ResourceDailyAllocation` | milestone-to-resource | `_id` |
 
 ## Entity References and Cross-Service Resolution
 
@@ -80,18 +80,18 @@ When Service A needs to return an entity owned by Service B, it returns a **fede
 
 ```typescript
 // In Users resolver — returning Milestone entity stubs
-@ResolveField(() => [MilestoneToUser], { nullable: true })
-async milestones(@Parent() user: User): Promise<MilestoneToUser[]> {
+@ResolveField(() => [MilestoneToResource], { nullable: true })
+async milestones(@Parent() user: User): Promise<MilestoneToResource[]> {
   const rows = await lastValueFrom(
-    this.mt2u.send('FIND_MILESTONE_TO_USER_BY_USER_ID', user._id)
+    this.mt2u.send('FIND_MILESTONE_TO_RESOURCE_BY_USER_ID', user._id)
   );
   // Return stubs — federation resolves the rest
-  return rows.map(r => ({ __typename: 'MilestoneToUser', _id: r._id }));
+  return rows.map(r => ({ __typename: 'MilestoneToResource', _id: r._id }));
 }
 ```
 
 ```typescript
-// In MilestoneToUser resolver — resolveReference fills the entity
+// In MilestoneToResource resolver — resolveReference fills the entity
 @ResolveReference()
 async resolveReference(ref: { __typename: string; _id: string }) {
   return this.milestoneToUserService.findByIdForFederation(ref._id);
@@ -122,7 +122,7 @@ export class JobRole {
 ```mermaid
 graph LR
     subgraph Users Service
-        U[User] -->|milestones| M2U_stub[MilestoneToUser stub]
+        U[User] -->|milestones| MTR_stub[MilestoneToResource stub]
         U -->|subordinates| U_sub[User self-reference]
         U -->|groupIds| GA_call[GroupAssignments RPC]
     end
@@ -138,12 +138,12 @@ graph LR
     end
     
     subgraph Milestones Service
-        M[Milestone] -->|users| M2U_stub2[MilestoneToUser stubs]
+        M[Milestone] -->|users| MTR_stub2[MilestoneToResource stubs]
         M[Milestone] -->|projects| M2P_stub[MilestoneToProject stubs]
     end
     
-    subgraph MilestoneToUser Service
-        MTU[MilestoneToUser] -->|user| U_stub2[User stub]
+    subgraph MilestoneToResource Service
+        MTU[MilestoneToResource] -->|user| U_stub2[User stub]
         MTU -->|milestone| M_stub[Milestone stub]
         MTU -->|roleCategory| RC_stub[RoleCategory stub]
     end
@@ -227,20 +227,20 @@ sequenceDiagram
     participant Client
     participant Gateway
     participant Users as Users Subgraph
-    participant M2U as MilestoneToUser Subgraph
+    participant MTR as MilestoneToResource Subgraph
     participant Milestones as Milestones Subgraph
 
     Client->>Gateway: query { findOneUser(userId: "X") { authData { name } milestones { milestone { milestoneBasicData { name } } } } }
     
     Gateway->>Gateway: Query plan: 1) Users for base fields + milestone stubs
     Gateway->>Users: findOneUser(userId: "X") → authData.name + milestones RPC
-    Users->>M2U: RPC FIND_MILESTONE_TO_USER_BY_USER_ID
-    M2U-->>Users: [{_id: "m2u1"}, {_id: "m2u2"}]
-    Users-->>Gateway: { authData: {name: "John"}, milestones: [{__typename: "MilestoneToUser", _id: "m2u1"}, ...] }
+    Users->>MTR: RPC FIND_MILESTONE_TO_RESOURCE_BY_USER_ID
+    MTR-->>Users: [{_id: "mtr1"}, {_id: "mtr2"}]
+    Users-->>Gateway: { authData: {name: "John"}, milestones: [{__typename: "MilestoneToResource", _id: "mtr1"}, ...] }
     
-    Gateway->>Gateway: Query plan: 2) MilestoneToUser for full entities
-    Gateway->>M2U: __resolveReference({_id: "m2u1"}) → milestoneId, milestone stub
-    M2U-->>Gateway: { milestoneId: "ms1", milestone: {__typename: "Milestone", _id: "ms1"} }
+    Gateway->>Gateway: Query plan: 2) MilestoneToResource for full entities
+    Gateway->>MTR: __resolveReference({_id: "mtr1"}) → milestoneId, milestone stub
+    MTR-->>Gateway: { milestoneId: "ms1", milestone: {__typename: "Milestone", _id: "ms1"} }
     
     Gateway->>Gateway: Query plan: 3) Milestones for milestone data
     Gateway->>Milestones: __resolveReference({_id: "ms1"}) → milestoneBasicData.name

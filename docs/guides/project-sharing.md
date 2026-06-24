@@ -58,7 +58,7 @@ If the target user already has an explicit access record, it is updated to the n
 ### Rules
 
 - You **cannot revoke the owner's record** — use Transfer Ownership instead
-- Revoking explicit access does **not** remove implicit access: if the user is allocated to a milestone (M2U) in the project, they retain `viewer` access. The M2U allocation must be removed separately.
+- Revoking explicit access does **not** remove implicit access: if the user is allocated to a milestone (MTR) in the project, they retain `viewer` access. The MTR allocation must be removed separately.
 - Caller must be the owner, `collaborator`, supervisor of the owner, or SUPERADMIN
 
 ```
@@ -109,7 +109,7 @@ When the system checks a user's access to a project, it evaluates all sources an
 ├──────────────────────────┤
 │ 1. Explicit DB record    │ → role as stored (owner/collaborator/editor/viewer)
 │ 2. Supervisor chain      │ → editor (+ share/transfer capabilities)
-│ 3. M2U implicit          │ → viewer
+│ 3. MTR implicit          │ → viewer
 │ 4. SUPERADMIN group      │ → unrestricted
 ├──────────────────────────┤
 │ Return: max(all matches) │
@@ -126,7 +126,7 @@ Check the role you assigned. `viewer` grants read-only access. Change the share 
 
 ### "I revoked access but the user can still see the project"
 
-The user likely has implicit access via M2U — they are allocated to a milestone in the project. Remove the M2U allocation to fully revoke access.
+The user likely has implicit access via MTR — they are allocated to a milestone in the project. Remove the MTR allocation to fully revoke access.
 
 ### "I want to transfer ownership but the button is disabled"
 

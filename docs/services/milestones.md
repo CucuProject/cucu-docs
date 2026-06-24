@@ -1,190 +1,58 @@
 # Milestones Service
 
-The Milestones service manages **milestones** (work packages with status tracking) and **milestone dependencies** (predecessor/successor relationships).
+Milestones owns milestone base data, notes, status, lock state, and dependency graph. Planned dates live here; project-specific operative dates live in Milestone to Project.
 
-## Overview
+## Runtime Role
 
-| Property | Value |
-|----------|-------|
-| Port | 3004 |
-| Database | `milestones_{tenantSlug}` |
-| Collections | `milestonedocuments`, `milestonedependencies` |
-| Module | `MilestonesModule` |
-| Context | `MilestonesContext` (request-scoped) |
+- Owns `Milestone`, `MilestoneDependency`, and `MilestoneNote`.
+- Resolves `Milestone.projects` through Milestone to Project.
+- Resolves `Milestone.resources` through Milestone to Resource.
+- Calls Milestone to Project when project assignment ids are present in milestone payloads.
+- Emits milestone lifecycle events to Milestone to Resource for assignment synchronization.
+- Uses ProjectAccess through Milestone to Project for object visibility and mutation checks.
 
-## Schemas
+## GraphQL Surface
 
-### Milestone
+- Milestones: `findAllMilestones`, `findOneMilestone`, `createMilestone`, `createMilestones`, `updateMilestone`, `removeMilestone`, `updateMilestoneStatus`.
+- Notes: `findMilestoneNotesByMilestone`, `createMilestoneNote`, `updateMilestoneNote`, `removeMilestoneNote`.
+- Dependencies: query by project/milestone, create, remove.
 
-```typescript
-@Directive('@key(fields: "_id")')
-class Milestone {
-  _id: string
-  color?: string                     // Hex color for UI (auto-assigned)
-  isLocked?: boolean                 // Prevents modification when true
-  milestoneBasicData: MilestoneBasicDataSchema {
-    name: string
-    description: string
-    plannedStartDate: string
-    plannedEndDate: string
-    status: number                   // 0-100 (percentage completion)
-    effort?: number                  // Working days (person-days)
-  }
-  users?: MilestoneToUser[]         // Federation
-  projects?: MilestoneToProject[]   // Federation
-  deletedAt?: Date
-  tenantId?: string
-}
+## RPC and Events
 
-// Indexes: milestoneBasicData.name+deletedAt, milestoneBasicData.status+deletedAt, deletedAt
-```
+Inbound RPC:
 
-### MilestoneDependency
+- `MILESTONE_EXISTS`
+- `FIND_MILESTONE_BY_NAME`
+- `FIND_MILESTONES_BY_IDS`
+- `GET_MILESTONE_DATES`
+- `CREATE_MILESTONE`
+- `UPDATE_MILESTONE`
+- `UPDATE_MILESTONE_STATUS`
+- `DELETE_MILESTONE`
+- `FIND_DEPENDENCIES_BY_MILESTONE_IDS`
 
-```typescript
-class MilestoneDependency {
-  _id: string
-  projectId: string
-  sourceMilestoneId: string         // predecessor
-  targetMilestoneId: string         // successor
-  type: string                      // "finish-to-start", etc.
-}
-```
+Outbound:
 
-## GraphQL Schema
+- `CREATE_MILESTONE_TO_PROJECT`
+- `MILESTONE_CREATED`
+- `MILESTONE_UPDATED`
+- `MILESTONE_DELETED`
 
-### Milestone Queries & Mutations
+Inbound events:
 
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllMilestones` | Query | `pagination?, filter?: MilestoneFilterInput, sort?` | `PaginatedMilestones!` |
-| `findOneMilestone` | Query | `milestoneId: ID!` | `Milestone!` |
-| `createMilestone` | Mutation | `createMilestoneInput` | `Milestone!` |
-| `createMilestones` | Mutation | `inputs: [CreateMilestoneInput]!` | `[Milestone]!` |
-| `updateMilestone` | Mutation | `updateMilestoneInput` | `Milestone!` |
-| `removeMilestone` | Mutation | `milestoneId: ID!` | `DeleteMilestoneOutput!` |
-| `updateMilestoneStatus` | Mutation | `milestoneId: ID!, status: Float!` | `Milestone!` |
+- `PERMISSIONS_CHANGED`
 
-### Dependency Queries & Mutations
+## Access Rules
 
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findDependenciesByProject` | Query | `projectId: ID!` | `[MilestoneDependency]!` |
-| `findDependenciesByMilestone` | Query | `milestoneId: ID!` | `[MilestoneDependency]!` |
-| `createMilestoneDependency` | Mutation | `input` | `MilestoneDependency!` |
-| `removeMilestoneDependency` | Mutation | `dependencyId: ID!` | `Boolean!` |
+Milestones must not be visible in isolation. Visibility is inherited through accessible Projects via Milestone to Project. Planned date changes are blocked when any linked project is `ACTIVE` or `ARCHIVED`. Locked milestones block ordinary update/delete except lock toggle.
 
-### ResolveField
+## Failure Modes
 
-| Field | On | Returns | Description |
-|-------|-----|---------|-------------|
-| `users` | `Milestone` | `[MilestoneToUser]` | Via `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` RPC → federation stubs |
-| `projects` | `Milestone` | `[MilestoneToProject]` | Via `FIND_MILESTONE_TO_PROJECT_BY_MILESTONE_ID` RPC → federation stubs |
+- Single milestone create first creates the milestone, then creates project links through `CREATE_MILESTONE_TO_PROJECT`; if link creation fails, the current code rolls back the milestone create in that path.
+- Bulk milestone create inserts all milestones first, then creates project links; if link creation fails, it deletes the inserted milestones by id. Downstream side effects still need to be considered when adding new consumers.
+- `MILESTONE_CREATED`, `MILESTONE_UPDATED`, and `MILESTONE_DELETED` are emitted to Milestone to Resource best effort; emit failures are logged and do not roll back the local milestone mutation.
+- Read enrichment for `Milestone.projects` and `Milestone.resources` can return empty arrays when downstream RPCs fail.
 
-## RPC Patterns
+## Boundary Note
 
-### MessagePattern Handlers
-
-| Pattern | Input | Output | Purpose |
-|---------|-------|--------|---------|
-| `MILESTONE_EXISTS` | `string \| {id}` | `boolean` | Check existence |
-| `FIND_MILESTONE_BY_NAME` | `{name}` | `Milestone \| null` | Find by name |
-| `GET_MILESTONE_DATES` | `string` | `{startDate, endDate}` | Get date range |
-| `CREATE_MILESTONE` | `CreateMilestoneInput` | `Milestone` | Create (bootstrap) |
-| `UPDATE_MILESTONE` | `UpdateMilestoneInput` | `Milestone` | Update |
-| `UPDATE_MILESTONE_STATUS` | `{milestoneId, status}` | `Milestone` | Update status |
-| `DELETE_MILESTONE` | `string` | `Milestone` | Delete |
-
-### Outbound Events
-
-| Target | Pattern | When |
-|--------|---------|------|
-| MilestoneToUser | `MILESTONE_CREATED` | After creation (with assignedUserIds) |
-| MilestoneToUser | `MILESTONE_UPDATED` | After update |
-| MilestoneToUser | `MILESTONE_DELETED` | After deletion |
-| MilestoneToProject | `MILESTONE_CREATED` | After creation (with assignedProjectIds) |
-| MilestoneToProject | `MILESTONE_UPDATED` | After update |
-| MilestoneToProject | `MILESTONE_DELETED` | After deletion |
-
-## Business Logic
-
-### Bulk Create
-
-`createMilestones` accepts an array of `CreateMilestoneInput` and creates them in sequence, returning all created milestones. Each milestone creation emits its own events.
-
-### Status Updates
-
-Status is a numeric percentage (0-100). The `updateMilestoneStatus` mutation accepts the milestone ID and the new status value, updating only the `milestoneBasicData.status` field.
-
-### Color Assignment
-
-Milestones can have an optional hex color for UI display. If not provided during creation, one may be auto-assigned.
-
-## ARCHIVED Project Guard
-
-When a milestone belongs to a project with status `ARCHIVED`:
-
-- **`update()`** — blocked with `BadRequestException` unless the update only toggles `isLocked`. The lock toggle is always allowed even on ARCHIVED projects.
-- **`remove()`** — blocked with `BadRequestException`. A milestone linked to an ARCHIVED project cannot be deleted.
-
-The check is performed via `HAS_ARCHIVED_PROJECT_FOR_MILESTONE` on the MilestoneToProject service, which in turn checks project statuses via `GET_PROJECTS_STATUS` on the Projects service.
-
-> Note: a milestone may be linked to multiple projects. The guard triggers if **any** linked project is ARCHIVED.
-
-## Query Access Filtering
-
-Access filtering is applied at the query level to ensure users only see milestones they have access to:
-
-- **`findAllMilestones`** — calls `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` on ProjectAccess to get the user's accessible project IDs (safe, no M2U circular dependency), then calls `GET_MILESTONE_IDS_BY_PROJECT_IDS` on M2P to get the corresponding milestone IDs. Only milestones within that set are returned.
-- **`findById`** (`findOneMilestone`) — fetches the milestone, then checks if it belongs to an accessible project via `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` + M2P. Throws `ForbiddenException` if the user cannot access any project the milestone belongs to.
-
-> `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` (not `GET_ALL`) is used here to avoid circular calls: M2U calling back into M2U via M2U implicit access resolution.
-
-## Date Architecture: Planned vs Actual
-
-Milestones use a **dual-date system** to track plan vs reality:
-
-| Field | Location | Purpose |
-|-------|----------|---------|
-| `plannedStartDate` | `Milestone.milestoneBasicData` | Baseline — the original plan |
-| `plannedEndDate` | `Milestone.milestoneBasicData` | Baseline — the original plan |
-| `startDate` | `MilestoneToProject` | Actual/operative — changes when Gantt bar is dragged |
-| `endDate` | `MilestoneToProject` | Actual/operative — changes when Gantt bar is dragged |
-
-**Lifecycle:**
-
-1. **DRAFT project** — Both planned and actual dates are freely editable. The wizard creates the milestone with `plannedStartDate`/`plannedEndDate`, then creates the M2P record with the same dates as `startDate`/`endDate`.
-2. **ACTIVE project** — Planned dates are **frozen** (read-only). Only M2P `startDate`/`endDate` can change via Gantt drag. This preserves the original baseline for variance analysis.
-3. **Variance** — The deviation between plan and reality is computed as: `M2P.startDate - Milestone.plannedStartDate`.
-
-> **Historical note:** `startDate`/`endDate` were originally on `MilestoneBasicData` but were removed in PR #218 (March 2026) to avoid data duplication. The M2P record is the single source of truth for operative dates.
-
-### Planned Dates Freeze Guard
-
-When updating a milestone, if the DTO contains `plannedStartDate` or `plannedEndDate`, the service checks via RPC whether any associated project is ACTIVE or ARCHIVED:
-
-```
-Milestones → M2P (HAS_ACTIVE_PROJECT_FOR_MILESTONE) → Projects (GET_PROJECTS_STATUS)
-```
-
-- Milestones service does **NOT** communicate directly with Projects — it always goes through M2P as intermediary.
-- If any associated project is ACTIVE or ARCHIVED → `BadRequestException`.
-- If all projects are DRAFT or no project is associated → update proceeds.
-
-## Locked Milestone (`isLocked`)
-
-When a milestone is locked:
-
-**Backend guards:**
-- `update()` — blocks ALL modifications except toggling `isLocked` itself. If `dto.isLocked` is defined, the guard is skipped (allows unlock). Otherwise, checks `isLocked` and throws `BadRequestException('Cannot modify a locked milestone. Unlock it first.')`.
-- `remove()` — blocks deletion with `BadRequestException('Cannot delete a locked milestone. Unlock it first.')`.
-
-**Frontend behavior (sidebar + drawer + context menu):**
-- Lock icon is always visible next to the milestone name (sidebar row + drawer).
-- Lock toggle button in sidebar is always visible and clickable.
-- Edit (pencil) and Delete (trash) icons are **visible but disabled** (`opacity: 0.25`, `cursor: not-allowed`) — NOT hidden.
-- Context menu: Edit and Delete entries are visible but disabled.
-- MilestoneDrawer: all pencils disabled, color picker not clickable, delete button disabled.
-- Gantt bar: not draggable, not resizable.
-
-**Design principle:** Disabled ≠ Hidden. The user should always see that actions exist but are blocked by the lock state. This communicates intent clearly.
+The old `MilestoneToResource` naming is obsolete. Current runtime uses Milestone to Resource for user/resource/AI allocation.

@@ -334,7 +334,7 @@ Every microservice that stores data in MongoDB imports `@cucu/tenant-db`:
 | **organization** | `TenantDatabaseModule.forService('organization')`, companies/roles/seniority per tenant |
 | **milestones** | `TenantDatabaseModule.forService('milestones')` |
 | **milestone-to-project** | `TenantDatabaseModule.forService('milestone-to-project')` |
-| **milestone-to-user** | `TenantDatabaseModule.forService('milestone-to-user')` |
+| **milestone-to-resource** | `TenantDatabaseModule.forService('milestone-to-resource')` |
 | **projects** | `TenantDatabaseModule.forService('projects')`, project/template/holiday data |
 | **project-access** | `TenantDatabaseModule.forService('project-access')` |
 
@@ -362,7 +362,7 @@ graph LR
         Org["organization"]
         MS["milestones"]
         M2P["milestone-to-project"]
-        M2U["milestone-to-user"]
+        MTR["milestone-to-resource"]
         Proj["projects"]
         PA["project-access"]
     end
@@ -374,7 +374,7 @@ graph LR
     Org --> TDB
     MS --> TDB
     M2P --> TDB
-    M2U --> TDB
+    MTR --> TDB
     Proj --> TDB
     PA --> TDB
 ```

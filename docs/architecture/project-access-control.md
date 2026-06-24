@@ -24,7 +24,7 @@ Each user's effective access level on a project is one of:
 | `collaborator` | ✅ | ✅ | ✅ | ❌ |
 | `editor` | ✅ | ✅ | ❌ | ❌ |
 | `viewer` (explicit) | ✅ | ❌ | ❌ | ❌ |
-| `viewer` (implicit M2U) | ✅ | ❌ | ❌ | ❌ |
+| `viewer` (implicit MTR) | ✅ | ❌ | ❌ | ❌ |
 | Supervisor chain | ✅ | ✅ | ✅ | ✅ |
 | SUPERADMIN | ✅ | ✅ | ✅ | ✅ |
 
@@ -44,7 +44,7 @@ owner > collaborator > editor > viewer
 |--------|--------------|-------|
 | Explicit DB record (`ProjectAccess`) | As stored (`owner` / `collaborator` / `editor` / `viewer`) | Created via share or auto-created at project creation |
 | Supervisor chain of project owner | `editor` | Direct or indirect supervisor of the owner |
-| M2U implicit | `viewer` | User is allocated to a milestone of the project (no DB record) |
+| MTR implicit | `viewer` | User is allocated to a milestone of the project (no DB record) |
 | SUPERADMIN group | Unrestricted | Bypasses all access checks |
 
 > **Example:** A user with an explicit `viewer` record who is also a supervisor of the project owner will have effective level `editor` (supervisor takes precedence over the explicit viewer record).
@@ -54,7 +54,7 @@ owner > collaborator > editor > viewer
 1. **Owner** — the `createdBy` field on the project, set automatically at creation. An `OWNER` record is also created in `ProjectAccess`.
 2. **Supervisor chain** — the system walks up `supervisorIds` of the project owner until the root. All supervisors in the chain gain `editor`-level access plus share and transfer-ownership capabilities.
 3. **Explicit share** — a `ProjectAccess` record with role `collaborator` / `editor` / `viewer`, created via the `shareProject` mutation.
-4. **Implicit viewer (M2U)** — the user has a `MilestoneToUser` record on any milestone of the project. Resolved at runtime — no `ProjectAccess` record is created.
+4. **Implicit viewer (MTR)** — the user has a `MilestoneToResource` record on any milestone of the project. Resolved at runtime — no `ProjectAccess` record is created.
 
 ### Access Rule
 
@@ -72,7 +72,7 @@ The `GET_PROJECT_ACCESS_LEVEL` RPC runs the following checks in sequence and ret
 
 1. **Explicit record** — query `{projectId, userId}` in DB → level as stored
 2. **Supervisor check** — call `GET_SUPERVISOR_CHAIN` on Users service; if the current user appears in the chain of the project's owner → `editor`
-3. **M2U implicit** — call `HAS_M2U_FOR_USER_IN_PROJECT` on MilestoneToUser; if true → `viewer`
+3. **MTR implicit** — call `HAS_MTR_FOR_USER_IN_PROJECT` on MilestoneToResource; if true → `viewer`
 4. **SUPERADMIN** — if user is in SUPERADMIN group → return unrestricted
 
 All four checks are performed; the maximum result is returned.
@@ -83,7 +83,9 @@ Explicit access is a `ProjectAccess` record stored in the `project-access_{tenan
 
 ### Owner record auto-creation
 
-When a project is created, the Projects service emits `PROJECT_OWNER_CREATED`. The ProjectAccess service listens and automatically creates an `OWNER` record for the creator (`createdBy` field). This record is the canonical source of truth for project ownership.
+When a project is created, the current Projects service calls `CREATE_OWNER_ACCESS` on ProjectAccess after the project document is inserted. ProjectAccess also still handles the historical `PROJECT_OWNER_CREATED` event for backward compatibility. The explicit `OWNER` access record is the access-control source of truth, while `projects.createdBy` remains the project-side owner/provenance field.
+
+Important current behavior: Projects logs `CREATE_OWNER_ACCESS` failures and does not roll back the already-created project. That means owner access can require reconciliation if ProjectAccess is unavailable during project creation.
 
 ### Share API
 
@@ -96,13 +98,13 @@ The Share API allows users with sufficient access to grant access to others.
 | `revokeAccess` | `RevokeAccessInput` | Owner, `collaborator`, supervisor of owner, or SUPERADMIN | Cannot revoke the owner record |
 | `getProjectShares` | `projectId` | — (query, access-checked) | Returns all explicit `ProjectAccess` records for the project |
 
-## Implicit Access via M2U
+## Implicit Access via MTR
 
-When a user is allocated to a milestone that belongs to a project (via a `MilestoneToUser` record), they automatically gain **viewer-level access** to that project. No `ProjectAccess` record is created — this is resolved dynamically at query time.
+When a user is allocated to a milestone that belongs to a project (via a `MilestoneToResource` record), they automatically gain **viewer-level access** to that project. No `ProjectAccess` record is created — this is resolved dynamically at query time.
 
 This implicit access means:
 - Allocated users can always view the project and its data
-- Revoking explicit access does not remove implicit access (the M2U allocation must be removed separately)
+- Revoking explicit access does not remove implicit access (the MTR allocation must be removed separately)
 - **ARCHIVED projects:** allocated users retain their implicit viewer access even after a project is archived
 
 ## The Circular Dependency Problem
@@ -110,9 +112,9 @@ This implicit access means:
 When filtering queries by accessible projects, a circular dependency can form:
 
 ```
-findAllMilestones (M2U service)
+findAllMilestones (MTR service)
   → GET_ALL_ACCESSIBLE_PROJECT_IDS (project-access)
-    → HAS_M2U_FOR_USER_IN_PROJECT (M2U service)   ← M2U calling back into M2U!
+    → HAS_MTR_FOR_USER_IN_PROJECT (MTR service)   ← MTR calling back into MTR!
 ```
 
 This would cause a deadlock or infinite loop.
@@ -122,12 +124,12 @@ This would cause a deadlock or infinite loop.
 The `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` RPC exists specifically to break this cycle:
 
 - Returns accessible projects from **explicit DB records + supervisor chain only**
-- Does **not** call MilestoneToUser
-- Safe to call from M2P and M2U without risk of circular dependency
+- Does **not** call MilestoneToResource
+- Safe to call from M2P and MTR without risk of circular dependency
 
 ```
-findAllMilestones (M2U service)
-  → GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS (project-access)  ← safe: no M2U call
+findAllMilestones (MTR service)
+  → GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS (project-access)  ← safe: no MTR call
     → GET_MILESTONE_IDS_BY_PROJECT_IDS (M2P)
       → return filtered milestones
 ```
@@ -136,17 +138,17 @@ findAllMilestones (M2U service)
 
 | RPC | When to use |
 |-----|------------|
-| `GET_ALL_ACCESSIBLE_PROJECT_IDS` | From Projects service; from any downstream consumer that does NOT feed back into M2P or M2U |
-| `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | From M2P and M2U (avoids circular call) |
+| `GET_ALL_ACCESSIBLE_PROJECT_IDS` | From Projects service; from any downstream consumer that does NOT feed back into M2P or MTR |
+| `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | From M2P and MTR (avoids circular call) |
 
-The trade-off: `GET_EXPLICIT` may miss implicit viewer access (M2U allocations) when filtering M2P/M2U queries. This is intentional — a user filtering their own milestones will naturally see what they're assigned to through the M2U query itself.
+The trade-off: `GET_EXPLICIT` may miss implicit viewer access (MTR allocations) when filtering M2P/MTR queries. This is intentional — a user filtering their own milestones will naturally see what they're assigned to through the MTR query itself.
 
 ## ARCHIVED Projects
 
 When a project is archived (`status: ARCHIVED`):
 
 - The `ProjectAccess` records are preserved — explicit access is not revoked
-- Implicit M2U viewer access is preserved — allocated users can still view
+- Implicit MTR viewer access is preserved — allocated users can still view
 - **No write operations** are allowed on the project or its milestones/assignments (see individual service docs for guard details)
 - The only allowed change on the project itself is a status update back to `ACTIVE`
 
@@ -157,8 +159,8 @@ Access and visibility are intentionally kept intact during archiving so that his
 | Pattern | Input | Output | Purpose |
 |---------|-------|--------|---------|
 | `GET_PROJECT_ACCESS_LEVEL` | `{projectId, userId}` | `{level: ProjectAccessRole \| null}` | Effective access level (all sources combined) |
-| `GET_ALL_ACCESSIBLE_PROJECT_IDS` | `{userId}` | `{projectIds: string[], isUnrestricted: boolean}` | All accessible projects (explicit + supervisor + M2U) |
-| `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | `{userId}` | `{projectIds: string[], isUnrestricted: boolean}` | Explicit + supervisor only (no M2U — breaks circular dependency) |
+| `GET_ALL_ACCESSIBLE_PROJECT_IDS` | `{userId}` | `{projectIds: string[], isUnrestricted: boolean}` | All accessible projects (explicit + supervisor + MTR) |
+| `GET_EXPLICIT_ACCESSIBLE_PROJECT_IDS` | `{userId}` | `{projectIds: string[], isUnrestricted: boolean}` | Explicit + supervisor only (no MTR — breaks circular dependency) |
 | `UPDATE_PROJECT_CREATED_BY` | `{projectId, newOwnerId}` | `void` | Updates `createdBy` on the project (called during ownership transfer) |
 
 ## Design Decisions
@@ -166,7 +168,7 @@ Access and visibility are intentionally kept intact during archiving so that his
 | Decision | Rationale |
 |----------|-----------|
 | SuperAdmin = SUPERADMIN group in grants service | Not a flag on the user entity — reuses existing grants/group infrastructure |
-| M2U implicit viewer = runtime lookup | No denormalization — avoids sync issues when M2U records change |
+| MTR implicit viewer = runtime lookup | No denormalization — avoids sync issues when MTR records change |
 | `createdBy` nullable on Project | Backward compatibility with pre-existing data in dev/staging environments |
 | Previous owner → `collaborator` on transfer | Preserves the ability to share (an `editor` could not re-share the project) |
 | `collaborator` naming | Temporary — may be renamed in a future iteration |

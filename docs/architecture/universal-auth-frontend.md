@@ -323,6 +323,8 @@ sequenceDiagram
     Frontend->>Frontend: Navigate to /setup (middleware handles new tenant context)
 ```
 
+Backend caveat: current Gateway code sets the refresh cookie on `/auth/switch` but does not update the `cucu_at` access-token cookie used by frontend middleware. The new access token is returned in the body. CUC-264..CUC-269 track making tenant switch cookie behavior symmetric with login/refresh.
+
 ### Frontend Component
 
 ```typescript

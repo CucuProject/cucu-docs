@@ -62,6 +62,7 @@ export default defineConfig({
             { text: 'Projects', link: '/services/projects' },
             { text: 'Rates', link: '/services/rates' },
             { text: 'Roadmaps', link: '/services/roadmaps' },
+            { text: 'Commercial', link: '/services/commercial' },
             { text: 'Resources', link: '/services/resources' },
             { text: 'AI Agents', link: '/services/ai-agents' },
             { text: 'Tenants', link: '/services/tenants' },

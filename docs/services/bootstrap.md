@@ -38,6 +38,28 @@ Bootstrap owns no runtime data. It should stay idempotent and explicit. Do not h
 
 The Rates seeder reads the existing matrix inventory once per tenant and creates only exact missing dimension/amount/currency/validity combinations. It fails closed when inventory cannot be read. Direct owner and project-user economics use exact lookups before create; project-user economics are limited to the current tenant's explicitly billable seed users, so fixtures from another tenant are never replayed.
 
+## Kubernetes Operator Runbook
+
+The executable Desktop procedure lives in `infra/kubernetes/images/DESKTOP.md` in `cucu-nest`; that file is authoritative for commands and overlay names. The contract is:
+
+| Input | Required value |
+|---|---|
+| Runtime | Docker Desktop Kubernetes, context `docker-desktop` |
+| Mode | `demo` |
+| Tenant selection | Explicit unique subset of `acme`, `globex`, `initech` |
+| Run identity | New DNS-safe `BOOTSTRAP_RUN_ID`, matching the immutable Job `runId` |
+
+Before applying a Job, verify that the 19 applications and 20 datastore workloads are Ready and that no Bootstrap Job is active. Render the local, Bootstrap, and Desktop overlays with matching `runId`, `BOOTSTRAP_RUN_ID`, and `BOOTSTRAP_TENANTS`; require a successful server-side dry run before applying that exact render. A normal `cucu-apps` Helm upgrade does not run Bootstrap.
+
+For every run, preserve the Job and generate both reports:
+
+- `scripts/k8s-test-bootstrap-report.py` validates Job/image/run identity and emits a redacted per-step report with `ready`, `completed_with_warnings`, `incomplete`, or `failed` readiness;
+- `scripts/k8s-test-bootstrap-database-report.py` records authoritative tenant database, collection, and document totals. On rerun, pass the prior report as the baseline and require `comparison.identical=true`.
+
+A tenant is complete only when the Job succeeded, the step report is `ready` with zero warnings/errors, datastore totals are coherent, the authenticated user E2E passes, and the permanent workloads remain Ready. Tenant state `active` or process exit `0` alone is insufficient. Current per-step `created`/`updated`/`skipped` values are log signals, not authoritative persisted mutation counts; CUC-251 remains open for that contract.
+
+On failure, keep the Job, tenant record, and partial data. Repair the dependency or contract, then use a new run id. A `provisioning_failed` tenant may be retried only with the same owner. Never delete a tenant, Job, PVC, or lease to manufacture a clean result.
+
 ## Failure Modes
 
 - Bootstrap is a one-shot application context and calls `process.exit(0|1)` after completion/failure.

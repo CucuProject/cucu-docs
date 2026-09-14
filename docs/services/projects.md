@@ -30,7 +30,7 @@ Inbound RPC:
 - `UPDATE_PROJECT_CREATED_BY`
 - `GET_PROJECTS_STATUS`
 - `GET_PROJECTS_SUMMARY`
-- template seed/create/find/delete patterns
+- template seed/create/find/delete patterns; `SEED_PROJECT_TEMPLATES` reconciles the bounded system seed, recreates missing phases, and returns operation-authoritative `created`/`updated`/`skipped` counts
 
 Inbound events:
 

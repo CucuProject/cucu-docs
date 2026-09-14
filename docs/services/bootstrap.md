@@ -29,11 +29,13 @@ Bootstrap calls many services, including:
 - Users: `CREATE_USER`, `UPDATE_USER`.
 - Group assignments: `CREATE_GROUP_ASSIGNMENT`.
 - Projects: `SEED_PROJECT_TEMPLATES`, project template phase create/delete.
-- Rates: `CREATE_RATE`, `CREATE_COST`.
+- Rates: inventory reads plus `CREATE_RATE` and `CREATE_COST` for missing entries.
 
 ## Boundaries
 
 Bootstrap owns no runtime data. It should stay idempotent and explicit. Do not hide domain logic in bootstrap seeders.
+
+The Rates seeder reads the existing matrix inventory once per tenant and creates only exact missing dimension/amount/currency/validity combinations. It fails closed when inventory cannot be read. Direct owner and project-user economics use exact lookups before create; project-user economics are limited to the current tenant's explicitly billable seed users, so fixtures from another tenant are never replayed.
 
 ## Failure Modes
 
@@ -41,4 +43,4 @@ Bootstrap owns no runtime data. It should stay idempotent and explicit. Do not h
 - A top-level dependency or seeder failure aborts the process with exit code `1`; logs identify run id, stage, status, and error class without serializing the underlying error. There is still no persisted per-step/per-tenant report.
 - Several seeder internals catch missing optional records and continue, so a successful process exit does not by itself prove every optional demo/enrichment artifact was created.
 - Bootstrap must not become the only place where domain invariants live; runtime services still need to validate their own contracts.
-- Docker Desktop runtime evidence now covers recovery of the preserved failed ACME tenant, repeated ACME reruns with no document drift across the nine baseline tenant databases, and a fresh Globex first run. Structured per-step/per-tenant reporting, explicit Job deadline and owner-absent cases, and Orion remain tracked by CUC-430.
+- Docker Desktop runtime evidence now covers recovery of the preserved failed ACME tenant, warning-free ACME and Globex Rates recovery, and duplicate-free reruns with unchanged counts. Explicit Jobs must retain the established `cucu-bootstrap` release identity so the existing NetworkPolicy selects them; a differently named release fails dependency readiness before seed. Structured per-step/per-tenant reporting, explicit Job deadline and owner-absent cases, and Initech/Orion coverage remain tracked by CUC-430.

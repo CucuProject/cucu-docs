@@ -9,6 +9,7 @@ Organization owns professional lookup data used by users, allocation, rates, and
 - Resolves federation references.
 - Provides usage counts and usage breakdowns where implemented.
 - Provides RPC lookup/create endpoints for bootstrap and other services.
+- Name-based RPC lookups return only exact case-insensitive matches; a partial search result (for example `BA` matching `Back-End Developer`) is not accepted as the requested entity.
 
 ## GraphQL Surface
 

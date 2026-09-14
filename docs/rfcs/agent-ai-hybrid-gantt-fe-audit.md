@@ -18,29 +18,29 @@ Extend the project Gantt so one milestone can show both human assignees and AI a
 ### Gantt rendering
 
 - `src/components/GanttChart/types.ts`
-  - `M2USlot` is the single resource row model.
-  - Resource rows are `RowItem { type: 'resource'; m2u; task; rowIndex }`.
+  - `MTRSlot` is the single resource row model.
+  - Resource rows are `RowItem { type: 'resource'; mtr; task; rowIndex }`.
   - There is no assignee kind discriminator yet; a row is inferred as person if `userId` exists, otherwise role/draft.
 - `src/components/GanttChart/components/GanttSidebar.tsx`
   - Renders one milestone row and N resource rows.
-  - Resource name/cost/actions are tied to `M2USlot.user`, `roleCategory`, `jobRole`, `seniorityLevel`, `rate`.
+  - Resource name/cost/actions are tied to `MTRSlot.user`, `roleCategory`, `jobRole`, `seniorityLevel`, `rate`.
   - This is the right place to add row-level AI visual treatment and supervisor badge.
 - `src/components/GanttChart/components/GanttTimelineBars.tsx`
-  - Resource timeline rows are generic by `m2u._id`; allocation editing already works for any `M2USlot` if the BE exposes daily allocations.
+  - Resource timeline rows are generic by `mtr._id`; allocation editing already works for any `MTRSlot` if the BE exposes daily allocations.
   - No AI-specific timeline changes are required unless AI rows need read-only/default allocation rules.
 - `src/components/GanttChart/hooks/useGanttTasks.ts`
-  - Builds `GanttTask.m2uSlots` from `m2uByMilestone`.
+  - Builds `GanttTask.mtrSlots` from `mtrByMilestone`.
   - Sorting/grouping is resource-agnostic; add AI rows by extending slot data, not by introducing a parallel row pipeline.
 
 ### Data layer and GraphQL
 
 - `src/components/GanttDataLayer/GanttDataLayer.tsx`
-  - Passes initial `milestone.users` into `useM2UData` and then to `GanttChart`.
-- `src/components/GanttDataLayer/hooks/useM2UData.ts`
-  - Fetches M2U slots lazily via `GET_MILESTONE_TO_USER_BY_MILESTONE` and allocations via `GET_ALLOCATIONS_BY_M2U_IDS`.
+  - Passes initial `milestone.users` into `useMTRData` and then to `GanttChart`.
+- `src/components/GanttDataLayer/hooks/useMTRData.ts`
+  - Fetches MTR slots lazily via `GET_MILESTONE_TO_RESOURCE_BY_MILESTONE` and allocations via `GET_ALLOCATIONS_BY_MTR_IDS`.
 - `src/graphql/milestones.ts`
   - `GET_PROJECT_DETAIL` asks for `milestone.users` with human/role fields only.
-- `src/graphql/milestone-to-user.ts`
+- `src/graphql/milestone-to-resource.ts`
   - Create/update mutations accept generic input variables but selection sets return only `_id`, human/role fields and dates.
 - `src/graphql/generated.ts`
   - Currently a placeholder. The project uses hand-written GraphQL constants/types; if backend schema is extended, codegen can be used but is not presently the source of truth.
@@ -74,7 +74,7 @@ Add an explicit assignee kind to FE types instead of inferring from `userId`:
 ```ts
 type AssignmentKind = 'ROLE' | 'HUMAN' | 'AI_AGENT';
 
-interface M2USlot {
+interface MTRSlot {
   // existing fields...
   assignmentKind?: AssignmentKind;
   aiAgentId?: string;
@@ -95,12 +95,12 @@ Recommendation: keep the backend field names in FE (`aiAgent`, `supervisor`) and
 
 ## Required GraphQL changes
 
-Update all M2U selection sets that hydrate Gantt rows:
+Update all MTR selection sets that hydrate Gantt rows:
 
 - `GET_PROJECT_DETAIL` in `src/graphql/milestones.ts`.
-- `GET_MILESTONE_TO_USER_BY_MILESTONE` in `src/graphql/milestone-to-user.ts`.
-- `UPDATE_MILESTONE_TO_USER` response in `src/graphql/milestone-to-user.ts`.
-- `CREATE_MILESTONE_TO_USER` response if optimistic/local refresh should identify AI rows immediately.
+- `GET_MILESTONE_TO_RESOURCE_BY_MILESTONE` in `src/graphql/milestone-to-resource.ts`.
+- `UPDATE_MILESTONE_TO_RESOURCE` response in `src/graphql/milestone-to-resource.ts`.
+- `CREATE_MILESTONE_TO_RESOURCE` response if optimistic/local refresh should identify AI rows immediately.
 - `GET_ALL_RESOURCE_DAILY_ALLOCATIONS` and `GET_ALLOCATED_USER_IDS_BY_PROJECT` only if allocation views/counts must include AI identity or prevent duplicate AI assignment.
 
 Expected additional fields, subject to BE schema names:
@@ -156,7 +156,7 @@ In `ResourceAddPopover`:
 - extend mode to `role | person | aiAgent`;
 - add `useAiAgentSearch()` or equivalent GraphQL hook;
 - require `aiAgentId` for AI mode;
-- pass `assignmentKind: 'AI_AGENT'`, `aiAgentId`, and optional `supervisorUserId` in `CreateMilestoneToUserInput` if supported;
+- pass `assignmentKind: 'AI_AGENT'`, `aiAgentId`, and optional `supervisorUserId` in `CreateMilestoneToResourceInput` if supported;
 - keep date range/default hours behavior identical to human rows unless BE says AI capacity differs.
 
 ### Edit assignment popover
@@ -184,8 +184,8 @@ Reason: local FE only knows hours reliably; cost resolution belongs to the backe
 
 Before FE implementation is considered complete, validate demo data has:
 
-- one project with at least one milestone containing both a human M2U and an AI-agent M2U;
-- AI M2U includes `aiAgentId`/`aiAgent` and supervisor data;
+- one project with at least one milestone containing both a human MTR and an AI-agent MTR;
+- AI MTR includes `aiAgentId`/`aiAgent` and supervisor data;
 - both rows have allocations in the milestone date range;
 - `projectCostSummary(projectId)` includes human + AI costs;
 - archived/viewer permission states still make both human and AI rows read-only.
@@ -193,8 +193,8 @@ Before FE implementation is considered complete, validate demo data has:
 Suggested validation query set:
 
 - `findOneProject(projectId)` → inspect `milestones[].milestone.users[]`;
-- `findMilestoneToUserByMilestoneId(milestoneId)` → verify lazy expansion parity;
-- `findAllocationsByM2UIds(m2uIds)` → verify row cells render;
+- `findMilestoneToResourceByMilestoneId(milestoneId)` → verify lazy expansion parity;
+- `findAllocationsByMTRIds(mtrIds)` → verify row cells render;
 - `projectCostSummary(projectId)` → verify cost total.
 
 ## Required tests
@@ -234,6 +234,6 @@ Add stable selectors while implementing UI (`data-testid="gantt-resource-row"`, 
 
 - Backend schema names for AI fields are not yet visible in this FE branch; confirm exact GraphQL fields before implementation.
 - If AI agents are not `User` records, do not reuse person search. Add a dedicated operation and hook.
-- Existing `M2USlot.isDraft` currently means role/unassigned. AI rows need `assignmentKind`; otherwise AI without `userId` could be misrendered as draft role.
+- Existing `MTRSlot.isDraft` currently means role/unassigned. AI rows need `assignmentKind`; otherwise AI without `userId` could be misrendered as draft role.
 - Cost summary is defined but unused; decide whether the hybrid Gantt feature owns adding visible cost or only preserving backend summary compatibility.
 - `src/graphql/generated.ts` is a placeholder. If codegen becomes required, wire generated types consistently rather than mixing generated and hand-written partials.

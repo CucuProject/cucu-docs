@@ -1,234 +1,183 @@
 # Grants Service
 
-The Grants service is the **permission engine** of the platform. It stores and manages Groups, field-level Permissions, operation-level OperationPermissions, and page-level PagePermissions. Every other service queries Grants to determine what the current user can do and see.
+The Grants service is Cucu's tenant-scoped permission engine. It owns Groups, field permissions, operation permissions, page permissions, current-user permission aggregation, and schema introspection for the permission admin UI.
 
-## Overview
+Grants answers "can this operation or field be used?" Object visibility for individual Projects is handled separately by ProjectAccess.
+
+## Service Profile
 
 | Property | Value |
-|----------|-------|
-| Port | 3010 |
+|---|---|
+| Runtime | NestJS subgraph + Redis RPC |
 | Database | `grants_{tenantSlug}` |
 | Collections | `groups`, `permissions`, `operationpermissions`, `pagepermissions` |
-| Module | `GrantsModule` |
-| Context | `GrantsContext` (request-scoped) |
+| App module | `apps/grants/src/grants.module.ts` |
+| Main service | `apps/grants/src/grants.service.ts` |
 
-## Architecture
+## Responsibilities
 
-### Module Structure
+- Manage permission groups.
+- Manage field-level permissions with view/edit scopes.
+- Manage operation-level permissions with operation scopes.
+- Manage page access permissions.
+- Aggregate effective permissions across multiple groups.
+- Provide `myPermissions` for the frontend.
+- Provide `FIND_BULK_PERMISSIONS_MULTI` for request-scoped permission caches.
+- Enforce permission invariants from `@cucu/permission-rules`.
+- Invalidate permission caches after changes.
+- Introspect the Gateway schema to list configurable fields, queries, and mutations.
 
-The Grants service has a **unique OperationGuard design**: it does NOT register OperationGuard as `APP_GUARD`. Instead, it applies `@UseGuards(OperationGuard)` on each resolver. This is because `APP_GUARD` with `Scope.REQUEST` breaks RPC handlers (DI cannot resolve request-scoped `PermissionsCacheService` in an RPC context).
+## Functional Role
 
+Grants is the permission control plane for what a user may do or see at operation, field, and page level. It does not decide whether a specific Project object is visible; that belongs to ProjectAccess. Product-wise, Grants powers admin-configurable roles such as SUPERADMIN, TOP_MANAGER, PROJECT_MANAGER, CONSULTANT, and ADMIN.
+
+Primary actors:
+
+- Permission admins configuring groups and grants.
+- Gateway asking for `GET_MY_PERMISSIONS` during login/me.
+- Subgraphs loading field/operation permissions for request-scoped checks.
+- ProjectAccess and other services using group lookups such as SUPERADMIN.
+- Bootstrap seeding base groups and default grants.
+
+Key enabled flows:
+
+- Login/menu shaping through effective permissions and page grants.
+- Resolver operation authorization through `OperationGuard`.
+- Field-level visibility/editability across tenant-aware services.
+- Permission admin UI introspection through Gateway schema queries.
+- Cache invalidation after permission mutations.
+
+## Data Model
+
+| Collection | Key fields | Index |
+|---|---|---|
+| `groups` | `name`, `description`, `deletedAt` | `{ name, deletedAt }` plus schema-level unique `name`. |
+| `permissions` | `groupId`, `entityName`, `fieldPath`, `canView`, `canEdit`, `viewScope`, `editScope` | unique `{ groupId, entityName, fieldPath }`. |
+| `operationpermissions` | `groupId`, `operationName`, `canExecute`, `operationScope` | unique `{ groupId, operationName }`. |
+| `pagepermissions` | `groupId`, `pageKey`, `canAccess` | unique `{ groupId, pageKey }`. |
+
+## GraphQL API
+
+| Area | Operations |
+|---|---|
+| Groups | `findAllGroups`, `findOneGroup`, `createGroup`, `updateGroup`, `removeGroup` |
+| Field permissions | `findAllPermissions`, `findPermissionsByGroup`, `createPermission`, `updatePermission`, `removePermission`, `bulkUpdatePermissions` |
+| Operation permissions | `findAllOperationPermissions`, `findOperationPermissionsByGroup`, `createOperationPermission`, `updateOperationPermission`, `removeOperationPermission`, `bulkUpdateOperationPermissions` |
+| Page permissions | `findAllPagePermissions`, `findPagePermissionsByGroup`, `createPagePermission`, `upsertPagePermission`, `updatePagePermission`, `removePagePermission` |
+| Current user | `myPermissions` |
+| Introspection | `listFieldsFromGateway`, `listQueryFromGateway`, `listMutationsFromGateway` |
+
+`OperationGuard` is applied at resolver level, not as a global `APP_GUARD`, because a request-scoped global guard breaks RPC handler DI in this service.
+
+## RPC API
+
+| Pattern | Purpose |
+|---|---|
+| `GROUP_EXISTS` | Referential group check. |
+| `FIND_GROUP_BY_NAME` | Lookup group by name, including SUPERADMIN checks. |
+| `CREATE_GROUP` | Bootstrap group creation. |
+| `CREATE_PERMISSION` | Bootstrap field permission creation. |
+| `UPSERT_PERMISSION` | Idempotent field permission seed/update. |
+| `CREATE_OPERATION_PERMISSION` | Bootstrap operation permission creation. |
+| `UPSERT_OPERATION_PERMISSION` | Idempotent operation permission seed/update. |
+| `FIND_OP_PERMISSIONS_BY_GROUP` | Operation permissions for a group. |
+| `FIND_PERMISSIONS_BY_GROUP` | Field permissions for a group, optionally by entity. |
+| `UPSERT_PAGE_PERMISSION` | Idempotent page permission seed/update. |
+| `FIND_PAGE_PERMISSIONS_BY_GROUP` | Page permissions for a group. |
+| `GET_MY_PERMISSIONS` | Effective permissions for a list of groups. |
+| `CHECK_OPERATION_PERMISSION` | Lightweight allowed/denied operation check. |
+| `FIND_BULK_PERMISSIONS_MULTI` | Hot-path operation and field permission aggregation. |
+
+## Permission Aggregation
+
+`FIND_BULK_PERMISSIONS_MULTI` loads permissions in bulk:
+
+- operation permissions are ORed across groups;
+- field permissions are ORed by entity and field path;
+- view/edit scopes are unioned;
+- `ALL` dominates when both `SELF` and `ALL` are present;
+- `INTERNAL_CALL` grants all known operations/fields for internal calls without user context.
+
+`GET_MY_PERMISSIONS` also returns page permissions and filters internal grants-management operations out of the frontend payload using `HIDDEN_FROM_MY_PERMISSIONS`.
+
+## Invariants
+
+- `canEdit=true` implies `canView=true`.
+- `canView=false` forces `canEdit=false`.
+- Empty scopes default to `ALL`.
+- Protected operations can only be enabled by SUPERADMIN or internal bootstrap.
+- Operations with fixed scope cannot be assigned another scope.
+- Bulk updates are limited to 500 items.
+- Field group siblings can be synced by `FIELD_GROUPS` after permission changes.
+
+## Cache Invalidation
+
+After field, operation, or page permission mutations, Grants emits:
+
+```ts
+PERMISSIONS_CHANGED { groupIds: [...] }
 ```
-GrantsModule
-├── TenantDatabaseModule.forService('grants')
-├── ConfigModule (global)
-├── ThrottlerModule (60/60s)
-├── MicroservicesOrchestratorModule
-├── TenantAwareClientsModule: GATEWAY_SERVICE
-└── GraphQLModule (ApolloFederationDriver)
 
-Controllers: GrantsController, GrantsBulkController
-Resolvers: GrantsResolver, OperationPermissionResolver, PagePermissionResolver, IntrospectionResolver
-Services: GrantsService, SubgraphIntrospectionService, PermissionsCacheService (local)
-```
+The event is emitted through the Gateway client configured in the Grants module. Other services listen for this event and invalidate local permission caches.
 
-### Local PermissionsCacheService
+Field-group synchronization is a separate side effect. `syncFieldGroup()` upserts sibling field permissions from `FIELD_GROUPS`, retries once after 500 ms on failure, then logs the retry failure without persisting a retry job or blocking the original permission mutation.
 
-Grants has its own `PermissionsCacheService` (not from `@cucu/service-common`) that is aliased:
+## Security Boundary
 
-```typescript
-{ provide: SCPermissionsCacheService, useExisting: PermissionsCacheService }
-```
+- RPC calls bypass GraphQL `OperationGuard`; bootstrap-sensitive handlers use `AllowRpcCallers('BOOTSTRAP')`.
+- The local permission cache only trusts `x-user-groups` when Gateway HMAC verification passes.
+- The service does not decode raw bearer JWTs to infer groups.
+- Internal federation calls without user context may resolve to `INTERNAL_CALL`; user-context calls remain permission checked.
 
-This ensures DI works seamlessly for shared interceptors/decorators.
+## Failure Modes
 
-## Schemas
+- Invalid invariant combinations are rejected: `canEdit` cannot exist without `canView`, fixed-scope operations cannot receive arbitrary scopes, and protected operations require SUPERADMIN/bootstrap.
+- Permission-cache invalidation is event-driven; if a consumer misses `PERMISSIONS_CHANGED`, stale per-service permission cache may live until its TTL/request lifecycle expires.
+- Gateway schema introspection can fail if Gateway is unavailable or introspection is disabled; that affects admin configurability discovery, not stored grants.
+- Soft-deleted groups plus schema-level unique `name` means group name reuse may fail even when a group is logically deleted.
+- Field-group sibling sync is not transactional with the original permission write; after two failed attempts, sibling permissions can remain inconsistent until manual repair or another write path touches them.
 
-### Group
+## Example
 
-```typescript
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-class Group {
-  _id: string
-  name: string               // required, unique
-  description?: string
-  tenantId?: string
-  deletedAt?: Date           // soft delete
-  createdAt?: Date
-  updatedAt?: Date
-}
-// Index: { name: 1, deletedAt: 1 }
-```
-
-### Permission (Field-Level)
-
-```typescript
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-class Permission {
-  _id: string
-  groupId: string            // → Group._id
-  entityName: string         // "User", "Project", "Milestone", etc.
-  fieldPath: string          // "authData.email", "personalData.dateOfBirth", etc.
-  canView: boolean
-  canEdit: boolean
-  viewScope: FieldScope[]    // ['self'] | ['all'] | ['self','all']
-  editScope: FieldScope[]
-  tenantId?: string
-}
-// Unique index: { groupId, entityName, fieldPath }
-```
-
-**FieldScope enum**: `SELF` (own records only) | `ALL` (all records)
-
-### OperationPermission
-
-```typescript
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-class OperationPermission {
-  _id: string
-  groupId: string            // → Group._id
-  operationName: string      // "findAllUsers", "createProject", etc.
-  canExecute: boolean
-  operationScope: OperationScope  // 'self' | 'all'
-  tenantId?: string
-}
-// Unique index: { groupId, operationName }
-```
-
-### PagePermission
-
-```typescript
-@Directive('@key(fields: "_id")')
-@Schema({ timestamps: true })
-class PagePermission {
-  _id: string
-  groupId: string
-  pageKey: string            // "people", "settings.seniorityLevels", "gantt"
-  canAccess: boolean
-  tenantId?: string
-}
-// Unique index: { groupId, pageKey }
-```
-
-## GraphQL Schema
-
-### Group Queries & Mutations
-
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllGroups` | Query | — | `[Group]!` |
-| `findOneGroup` | Query | `groupId: ID!` | `Group!` |
-| `createGroup` | Mutation | `input: CreateGroupInput!` | `Group!` |
-| `updateGroup` | Mutation | `updateGroupInput: UpdateGroupInput!` | `Group!` |
-| `removeGroup` | Mutation | `input: DeleteGroupInput!` | `DeleteGroupOutput!` |
-
-### Permission Queries & Mutations
-
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllPermissions` | Query | — | `[Permission]!` |
-| `findPermissionsByGroup` | Query | `groupId: ID!` | `[Permission]!` |
-| `createPermission` | Mutation | `input: CreatePermissionInput!` | `Permission!` |
-| `updatePermission` | Mutation | `updatePermissionInput: UpdatePermissionInput!` | `Permission!` |
-| `removePermission` | Mutation | `input: DeletePermissionInput!` | `DeletePermissionOutput!` |
-| `bulkUpdatePermissions` | Mutation | `groupId: ID!, inputs: [BulkPermissionUpdate]!` | `[Permission]!` |
-
-### OperationPermission Queries & Mutations
-
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllOperationPermissions` | Query | — | `[OperationPermission]!` |
-| `findOperationPermissionsByGroup` | Query | `groupId: ID!` | `[OperationPermission]!` |
-| `createOperationPermission` | Mutation | `input` | `OperationPermission!` |
-| `updateOperationPermission` | Mutation | `input` | `OperationPermission!` |
-| `removeOperationPermission` | Mutation | `_id: ID!` | `OperationPermission!` |
-| `bulkUpdateOperationPermissions` | Mutation | `groupId: ID!, inputs` | `[OperationPermission]!` |
-
-### PagePermission Queries & Mutations
-
-| Operation | Type | Args | Return |
-|-----------|------|------|--------|
-| `findAllPagePermissions` | Query | — | `[PagePermission]!` |
-| `findPagePermissionsByGroup` | Query | `groupId: ID!` | `[PagePermission]!` |
-| `createPagePermission` | Mutation | `input` | `PagePermission!` |
-| `upsertPagePermission` | Mutation | `input` | `PagePermission!` |
-| `updatePagePermission` | Mutation | `input` | `PagePermission!` |
-| `removePagePermission` | Mutation | `_id: ID!` | `PagePermission!` |
-
-### Special Queries
-
-| Query | Description |
-|-------|-------------|
-| `myPermissions` | Returns current user's effective permissions. Uses `@SkipOperationGuard()` — everyone can query their own permissions |
-| `listFieldsFromGateway(typeName)` | Introspect all nested fields of a GraphQL type |
-| `listQueryFromGateway(serviceName)` | List all queries for a service |
-| `listMutationsFromGateway(serviceName)` | List all mutations for a service |
-
-## RPC Patterns
-
-### MessagePattern Handlers
-
-| Pattern | Guard | Input | Output |
-|---------|-------|-------|--------|
-| `GROUP_EXISTS` | — | `string \| {id}` | `boolean` |
-| `FIND_GROUP_BY_NAME` | — | `string \| {name}` | `Group \| null` |
-| `CREATE_GROUP` | `RpcInternalGuard` | `CreateGroupInput + _internalSecret` | `Group` |
-| `CREATE_PERMISSION` | `RpcInternalGuard` | `CreatePermissionInput + _internalSecret` | `Permission` |
-| `UPSERT_PERMISSION` | `RpcInternalGuard` | `CreatePermissionInput + _internalSecret` | `Permission` |
-| `CREATE_OPERATION_PERMISSION` | `RpcInternalGuard` | input + `_internalSecret` | `OperationPermission` |
-| `UPSERT_OPERATION_PERMISSION` | `RpcInternalGuard` | input + `_internalSecret` | `OperationPermission` |
-| `UPSERT_PAGE_PERMISSION` | `RpcInternalGuard` | input + `_internalSecret` | `PagePermission` |
-| `FIND_OP_PERMISSIONS_BY_GROUP` | — | `{groupId}` | `OperationPermission[]` |
-| `FIND_PERMISSIONS_BY_GROUP` | — | `{groupId, entityName?}` | `Permission[]` |
-| `FIND_PAGE_PERMISSIONS_BY_GROUP` | — | `{groupId}` | `PagePermission[]` |
-| `FIND_BULK_PERMISSIONS_MULTI` | — | `{groupIds, entityNames?, opNames?}` | `BulkPermsDTO` |
-
-The `FIND_BULK_PERMISSIONS_MULTI` pattern is the most critical — it's called by `PermissionsCacheService` in every service to load permissions for the current request.
-
-### BulkPermsDTO Response
-
-```typescript
+```json
 {
-  canExecuteOps: string[],          // Operations the user can execute
-  canViewByEntity: {                // Viewable fields per entity
-    User: ["_id", "authData.name", "authData.email", ...],
-    Project: ["_id", "projectBasicData.name", ...],
-  },
-  scopeByEntity: {                  // Field scope per entity
-    User: { "personalData.dateOfBirth": "self", "authData.name": "all" }
-  },
-  operationScopeByOp: {            // Operation scope
-    findOneUser: "self",
-    findAllUsers: "all",
-  }
+  "groupIds": ["665..."],
+  "operation": "forceRevokeSession"
 }
 ```
 
-## Business Logic
+`CHECK_OPERATION_PERMISSION` response:
 
-### PERMISSIONS_CHANGED Event
-
-After any mutation that changes permissions (create/update/delete on Permission, OperationPermission, or PagePermission), the Grants service emits `PERMISSIONS_CHANGED`:
-
-```typescript
-this.gatewayClient.emit('PERMISSIONS_CHANGED', { groupIds: [affectedGroupId] });
+```json
+{ "allowed": true }
 ```
 
-This triggers instant cache invalidation across all services.
+## Relevant Tests
 
-### Upsert Logic
+- `apps/grants/tests/grants-controller.spec.ts`
+- `apps/grants/tests/grants-bulk-controller.spec.ts`
+- `apps/grants/tests/grants-permission.service.spec.ts`
+- `apps/grants/tests/grants-op-permission.service.spec.ts`
+- `apps/grants/tests/grants-page-permission.service.spec.ts`
+- `apps/grants/tests/grants-group.service.spec.ts`
+- `apps/grants/tests/grants-helpers.service.spec.ts`
 
-Upsert operations (`UPSERT_PERMISSION`, `UPSERT_OPERATION_PERMISSION`, `UPSERT_PAGE_PERMISSION`) use `findOneAndUpdate` with `upsert: true` to create or update in a single atomic operation. This is used by the Bootstrap service to idempotently seed permissions.
+## Notes and Risks
 
-### SubgraphIntrospectionService
+- `getCascadeRules` is imported for future backend cascade enforcement but is not used in the reviewed code.
+- `groups.name` is schema-unique while groups are soft-deleted, so name reuse after delete should be treated carefully.
+- Grants is not Project object visibility; keep it separate from ProjectAccess.
+- Permission-cache event reliability is tracked in CUC-277..CUC-284.
+- Field-group sync reliability/reconciliation is tracked in CUC-301..CUC-307.
 
-Queries the Gateway's GraphQL schema via introspection to discover all types, fields, queries, and mutations. Used to power the permission admin UI:
+## Source References
 
-```typescript
-async listAllNestedFields(typeName: string): Promise<string[]>
-async listAllQueriesByServiceName(serviceName: string): Promise<string[]>
-async listAllMutationsByServiceName(serviceName: string): Promise<string[]>
-```
+- `apps/grants/src/grants.module.ts`
+- `apps/grants/src/grants.service.ts`
+- `apps/grants/src/controllers/grants.controller.ts`
+- `apps/grants/src/controllers/grants-bulk.controller.ts`
+- `apps/grants/src/resolvers/grants.resolver.ts`
+- `apps/grants/src/resolvers/operation-permission.resolver.ts`
+- `apps/grants/src/resolvers/page-permission.resolver.ts`
+- `apps/grants/src/permissions/permissions-cache.service.ts`
+- `apps/grants/src/guard/operation.guard.ts`

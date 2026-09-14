@@ -51,10 +51,10 @@ Milestones service follows strict dependency rules:
 
 ```
 Milestones ──► MilestoneToProject ──► Projects
-   (M2U)            (M2P)              (Projects)
+   (MTR)            (M2P)              (Projects)
 ```
 
-- **Milestones knows about:** M2U (resources), M2P (project assignments)
+- **Milestones knows about:** MTR (resources), M2P (project assignments)
 - **Milestones does NOT know about:** Projects directly
 - **M2P is the intermediary:** When milestones needs project info (e.g., status for freeze guard), it asks M2P, which in turn asks Projects
 

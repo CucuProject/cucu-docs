@@ -119,7 +119,7 @@ flowchart TD
         PROJECTS[Projects :3003]
         HOLIDAYS[Holidays :3013]
         GA[GroupAssignments :3007]
-        M2U[MilestoneToUser :3005]
+        MTR[MilestoneToResource :3005]
         M2P[MilestoneToProject :3006]
         PA[ProjectAccess :3008]
     end
@@ -134,7 +134,7 @@ flowchart TD
     
     REDIS --> TENANTS & GRANTS & ORG
     TENANTS & GRANTS --> AUTH & USERS
-    USERS & MILESTONES --> M2U & M2P & GA
+    USERS & MILESTONES --> MTR & M2P & GA
     ALL --> GW
     GW --> BOOTSTRAP
 ```
@@ -208,9 +208,10 @@ flowchart TD
 ### Key Design Decisions
 
 1. **RPC-based seeding** — Bootstrap doesn't access databases directly; it calls services via Redis RPC. This ensures all business logic (validation, events) runs correctly.
-2. **Idempotent** — Each seeder checks if data already exists before creating. Safe to run multiple times.
-3. **RpcInternalGuard** — Bootstrap uses `_internalSecret` in payloads to authenticate to protected endpoints.
+2. **Rerun is gated, not assumed** — Seeders use a mix of lookup-before-create, upsert, and optional best-effort paths. A new explicit run is accepted only after its redacted step report, authoritative database totals, and authenticated E2E prove the selected tenant is ready and a rerun does not drift. Per-step mutation count coverage remains incomplete until CUC-251 is complete; converted steps alone are marked operation-authoritative.
+3. **Internal RPC authentication** — Legacy calls still carry `_internalSecret`. On the CUC-430 Kubernetes path, allowlisted mutating RPCs also use signed envelopes derived from a dedicated owner-mounted signing file; the runtime trims mounted values and fails closed when either credential is missing.
 4. **Multi-tenant aware** — Bootstrap creates tenants first, then seeds data within each tenant's context.
+5. **Explicit Kubernetes runs** — The Kubernetes seeder is rendered as an immutable Job with a unique run id and applied explicitly; it is not a Helm hook.
 
 ## Gateway Bootstrap
 

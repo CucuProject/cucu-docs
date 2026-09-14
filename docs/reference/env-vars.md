@@ -97,8 +97,8 @@ PROJECTS_SERVICE_NAME=projects
 PROJECTS_SERVICE_PORT=3003
 MILESTONES_SERVICE_NAME=milestones
 MILESTONES_SERVICE_PORT=3004
-MILESTONE_TO_USER_SERVICE_NAME=milestone-to-user
-MILESTONE_TO_USER_SERVICE_PORT=3008
+MILESTONE_TO_RESOURCE_SERVICE_NAME=milestone-to-resource
+MILESTONE_TO_RESOURCE_SERVICE_PORT=3008
 MILESTONE_TO_PROJECT_SERVICE_NAME=milestone-to-project
 MILESTONE_TO_PROJECT_SERVICE_PORT=3009
 GROUP_ASSIGNMENTS_SERVICE_NAME=group-assignments
@@ -220,20 +220,20 @@ MONGODB_URI=mongodb://milestones-db:27017/milestones
 MILESTONES_DEPENDENCIES=["users"]
 ```
 
-## MilestoneToUser Service
+## MilestoneToResource Service
 
 ```ini
 # Service Identity
-MILESTONE_TO_USER_SERVICE_NAME=milestone-to-user
-MILESTONE_TO_USER_SERVICE_PORT=3008
+MILESTONE_TO_RESOURCE_SERVICE_NAME=milestone-to-resource
+MILESTONE_TO_RESOURCE_SERVICE_PORT=3008
 
 # Database
-MILESTONE_TO_USER_DB_HOST=milestone-to-user-db
-MILESTONE_TO_USER_DB_PORT=9005
-MONGODB_URI=mongodb://milestone-to-user-db:27017/milestone-to-user
+MILESTONE_TO_RESOURCE_DB_HOST=milestone-to-resource-db
+MILESTONE_TO_RESOURCE_DB_PORT=9005
+MONGODB_URI=mongodb://milestone-to-resource-db:27017/milestone-to-resource
 
 # Dependencies
-MILESTONE_TO_USER_DEPENDENCIES=["users","milestones"]
+MILESTONE_TO_RESOURCE_DEPENDENCIES=["users","milestones"]
 ```
 
 ## MilestoneToProject Service

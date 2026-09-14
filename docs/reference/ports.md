@@ -11,7 +11,7 @@ This document lists all port assignments for services and databases in the Cucu 
 | **users** | 3002 | User Management |
 | **projects** | 3003 | Project Management |
 | **milestones** | 3004 | Milestone Management |
-| **milestone-to-user** | 3005 | User ↔ Milestone Relations |
+| **milestone-to-resource** | 3005 | User ↔ Milestone Relations |
 | **milestone-to-project** | 3006 | Project ↔ Milestone Relations |
 | **group-assignments** | 3007 | User ↔ Group Relations |
 | **project-access** | 3008 | Project Access Control |
@@ -28,7 +28,7 @@ This document lists all port assignments for services and databases in the Cucu 
 | **users** | 9002 | users |
 | **projects** | 9003 | projects |
 | **milestones** | 9004 | milestones |
-| **milestone-to-user** | 9005 | milestone-to-user |
+| **milestone-to-resource** | 9005 | milestone-to-resource |
 | **milestone-to-project** | 9006 | milestone-to-project |
 | **group-assignments** | 9007 | group-assignments |
 | **project-access** | 9008 | project-access |

@@ -1,169 +1,69 @@
 # Bootstrap Service
 
-The Bootstrap service is a **one-shot seeder** that initializes tenant data via RPC calls to other services. It runs after all services are available and seeds groups, permissions, users, milestones, project templates, and demo data.
+Bootstrap is a one-shot application context for tenant provisioning and seed data. It is not a runtime subgraph.
 
-## Overview
+## Runtime Role
 
-| Property | Value |
-|----------|-------|
-| Port | 3100 |
-| Database | None (RPC client only) |
-| Module | `BootstrapModule` |
-| Type | Non-federated (no GraphQL schema) |
+- Reads `bootstrap-seed.yaml`.
+- Seeds tenants, grants, lookup tables, users, project templates, rates/costs, and demo Roadmap/Project data.
+- Calls other services through Redis RPC.
+- Passes `_tenantSlug` for tenant-scoped operations.
+- Runs as provisioning/seed orchestration, not as a domain service.
+- Uses the legacy orchestrator readiness path outside Kubernetes.
+- On the CUC-430 Kubernetes branch, reads Redis TLS/ACL, the legacy internal HMAC, and the dedicated RPC signing key from owner-scoped mounted files; file values are normalized before use and incomplete configuration fails closed.
+- The Kubernetes path signs the allowlisted mutating RPCs, checks dependency markers with one bounded `MGET` per retry, and requires an immutable DNS-safe run id, `demo` mode, and an explicit unique subset of the built-in `acme`, `globex`, and `initech` fixtures.
+- Before seeding, each Kubernetes run acquires a Redis `SET NX` lease for every selected tenant in deterministic order. The 31-minute lease outlives the 30-minute Job deadline; a competing run fails in stage `lock`, and release checks the owning run id before deleting a lease.
 
-The Bootstrap service does **not** expose a GraphQL schema or listen for RPC messages. It only sends RPC calls to seed data.
+## GraphQL and RPC Surface
 
-## Architecture
+- GraphQL: none.
+- Inbound RPC: none.
+- Inbound events: none.
 
-### Module Structure
+## Outbound RPC
 
-```
-BootstrapModule
-├── ConfigModule (global)
-├── MicroservicesOrchestratorModule
-└── RedisClientsModule
-    ├── GRANTS_SERVICE
-    ├── USERS_SERVICE
-    ├── MILESTONES_SERVICE
-    ├── GROUP_ASSIGNMENTS_SERVICE
-    ├── GATEWAY_SERVICE
-    ├── ORGANIZATION_SERVICE
-    ├── PROJECTS_SERVICE
-    ├── HOLIDAYS_SERVICE
-    ├── MILESTONE_TO_PROJECT_SERVICE
-    └── TENANTS_SERVICE
+Bootstrap calls many services, including:
 
-Providers:
-├── BootstrapService (orchestrator)
-├── MultiTenantSeeder
-├── GrantsSeeder
-├── LookupTablesSeeder
-├── UsersSeeder
-├── MilestonesSeeder
-├── ProjectTemplatesSeeder
-└── DemoProjectSeeder
-```
+- Grants: `CREATE_GROUP`, `UPSERT_PERMISSION`, `UPSERT_OPERATION_PERMISSION`, `UPSERT_PAGE_PERMISSION`.
+- Organization: `CREATE_SENIORITY_LEVEL`, `CREATE_JOB_ROLE`, `CREATE_COMPANY`, `CREATE_ROLE_CATEGORY`.
+- Tenants: `UPSERT_USER_IDENTITY`.
+- Users: `CREATE_USER`, `UPDATE_USER`.
+- Group assignments: `CREATE_GROUP_ASSIGNMENT`.
+- Projects: `SEED_PROJECT_TEMPLATES`, project template phase create/delete.
+- Rates: inventory reads plus `CREATE_RATE` and `CREATE_COST` for missing entries.
 
-## Seeder Execution Order
+## Boundaries
 
-```mermaid
-flowchart TD
-    A[BootstrapService.onApplicationBootstrap] --> B[MultiTenantSeeder]
-    B --> C[GrantsSeeder]
-    C --> D[LookupTablesSeeder]
-    D --> E[UsersSeeder]
-    E --> F[MilestonesSeeder]
-    F --> G[ProjectTemplatesSeeder]
-    G --> H[DemoProjectSeeder]
-```
+Bootstrap owns no runtime data. It should stay idempotent and explicit. Do not hide domain logic in bootstrap seeders.
 
-## Seeders
+The Rates seeder reads the existing matrix inventory once per tenant and creates only exact missing dimension/amount/currency/validity combinations. It resolves the complete matrix before the first write and fails closed with a redacted error class when inventory, dimensions, configured users/projects/AI agents, or rate/cost mutations are unavailable. Direct owner, project-user, AI-agent, and project-AI-agent economics use lookup-before-create; project-user economics are limited to the current tenant's explicitly billable seed users, so fixtures from another tenant are never replayed.
 
-### 1. MultiTenantSeeder
+## Kubernetes Operator Runbook
 
-Creates the default tenant(s) via `BOOTSTRAP_TENANT` RPC to Tenants service.
+The executable Desktop procedure lives in `infra/kubernetes/images/DESKTOP.md` in `cucu-nest`; that file is authoritative for commands and overlay names. The contract is:
 
-**Flow**: Check if tenant exists → if not, create + provision databases + create user identity.
+| Input | Required value |
+|---|---|
+| Runtime | Docker Desktop Kubernetes, context `docker-desktop` |
+| Mode | `demo` |
+| Tenant selection | Explicit unique subset of `acme`, `globex`, `initech` |
+| Run identity | New DNS-safe `BOOTSTRAP_RUN_ID`, matching the immutable Job `runId` |
 
-### 2. GrantsSeeder
+Before applying a Job, verify that the 19 applications and 20 datastore workloads are Ready and that no Bootstrap Job is active. Render the local, Bootstrap, and Desktop overlays with matching `runId`, `BOOTSTRAP_RUN_ID`, and `BOOTSTRAP_TENANTS`; require a successful server-side dry run before applying that exact render. A normal `cucu-apps` Helm upgrade does not run Bootstrap.
 
-Seeds groups and their permissions. Uses YAML configuration files for declarative permission definitions.
+For every run, preserve the Job and generate both reports:
 
-**RPC calls**:
-- `FIND_GROUP_BY_NAME` → check existence
-- `CREATE_GROUP` (with `_internalSecret`) → create group
-- `UPSERT_PERMISSION` (with `_internalSecret`) → field-level permissions
-- `UPSERT_OPERATION_PERMISSION` (with `_internalSecret`) → operation permissions
-- `UPSERT_PAGE_PERMISSION` (with `_internalSecret`) → page permissions
+- `scripts/k8s-test-bootstrap-report.py` validates Job/image/run identity and emits a redacted per-step report with `ready`, `completed_with_warnings`, `incomplete`, or `failed` readiness;
+- `scripts/k8s-test-bootstrap-database-report.py` records authoritative tenant database, collection, and document totals. On rerun, pass the prior report as the baseline and require `comparison.identical=true`.
 
-All grant-related RPC calls are protected by `RpcInternalGuard` — the seeder includes `_internalSecret` in every payload.
+A tenant is complete only when the Job succeeded, the step report is `ready` with zero warnings/errors, datastore totals are coherent, the authenticated user E2E passes, and the permanent workloads remain Ready. Tenant state `active` or process exit `0` alone is insufficient. The structured report currently records operation-authoritative `created`/`updated`/`skipped` outcomes for provisioning, users, lookup tables, project templates, demo projects, roadmaps, commercial data, rates/costs, and tenant default currency. The demo Projects seeder counts project and milestone/M2P operations: it resolves the owner plus the complete template before writes, repairs a missing milestone link on rerun, and fails closed when an idempotency lookup or required owner/template/link operation cannot be verified. The Roadmaps seeder counts roadmap, release, and release-project operations; an existing entity is `skipped`, a create is `created`, and missing required owner/project data fails the step closed instead of being reduced to a warning. The Commercial seeder applies the same contract to customer, engagement, contract, contract-line, and allocation operations; missing required roadmap, release, project, customer, or contract fixture data aborts the step with a redacted error class instead of yielding an incomplete ready report. The Projects owner reconciles each system template and phase, recreates missing phases, and returns the counts to Bootstrap; a missing or malformed count contract fails the step closed. Default-currency lookup/update failures also abort the step instead of being reduced to a warning; a first assignment reports `updated`, while an already configured tenant reports `skipped`. Unconverted steps remain explicit as `counts: null` with `countAuthority: unavailable`; CUC-251 remains open until every step has an authoritative contract and a runtime rerun proves it.
 
-### 3. LookupTablesSeeder
+On failure, keep the Job, tenant record, and partial data. Repair the dependency or contract, then use a new run id. A `provisioning_failed` tenant may be retried only with the same owner. Never delete a tenant, Job, PVC, or lease to manufacture a clean result.
 
-Seeds organization lookup tables.
+## Failure Modes
 
-**RPC calls** to Organization service:
-- `FIND_SENIORITY_LEVEL_BY_NAME` / `CREATE_SENIORITY_LEVEL`
-- `FIND_JOB_ROLE_BY_NAME` / `CREATE_JOB_ROLE`
-- `FIND_ROLE_CATEGORY_BY_NAME` / `CREATE_ROLE_CATEGORY`
-
-### 4. UsersSeeder
-
-Seeds admin and test users.
-
-**RPC calls**:
-- `FIND_USER_BY_EMAIL` → check if exists
-- `CREATE_USER` → create user in tenant DB
-- `UPSERT_USER_IDENTITY` (Tenants) → create/update identity in platform DB
-
-### 5. MilestonesSeeder
-
-Seeds sample milestones.
-
-**RPC calls**:
-- `FIND_MILESTONE_BY_NAME` → check existence
-- `CREATE_MILESTONE` → create milestone
-
-### 6. ProjectTemplatesSeeder
-
-Seeds project templates with phases by calling the Projects service's `SEED_PROJECT_TEMPLATES` RPC.
-
-**RPC calls**:
-- `SEED_PROJECT_TEMPLATES` → triggers template seeding within the Projects service
-
-This approach runs template seeding with proper tenant context. The Projects service handles the idempotent creation of templates and phases internally.
-
-### 7. DemoProjectSeeder
-
-Seeds a demonstration project with milestone assignments.
-
-**RPC calls**:
-- `FIND_PROJECT_BY_NAME` → check existence
-- `CREATE_PROJECT` → create project
-- `CREATE_MILESTONE_TO_PROJECT` → link milestones to project
-
-## Configuration
-
-### YAML Definitions
-
-The GrantsSeeder loads permission definitions from YAML files via `yaml-loader.ts`:
-
-```typescript
-import { loadYaml } from '../utils/yaml-loader';
-
-const permissions = loadYaml('grants/permissions.yaml');
-```
-
-### Environment Keys
-
-Root environment keys are defined in `constants/root-env-keys.ts` and used by all seeders to determine which data to seed.
-
-## Key Design Decisions
-
-### Why RPC-based Seeding?
-
-Bootstrap doesn't access databases directly — it calls services via Redis RPC. This ensures:
-1. All business logic runs (validation, events, permissions)
-2. Multi-tenant routing is handled by each service's `TenantClsInterceptor` (via CLS context)
-3. Indexes are created by the owning service, not by Bootstrap
-4. Event-driven side effects fire correctly (e.g., GroupAssignments sync on user creation)
-
-### Idempotency
-
-Every seeder checks for existing data before creating:
-
-```typescript
-const existing = await lastValueFrom(
-  this.client.send('FIND_GROUP_BY_NAME', { name: 'SUPERADMIN' })
-);
-if (existing) {
-  this.logger.log('SUPERADMIN group already exists, skipping');
-  return existing;
-}
-```
-
-This makes Bootstrap safe to run multiple times — in development, after migrations, or after adding new seed data.
-
-### Tenant Context
-
-The Bootstrap service ensures tenant context is propagated with every RPC call. When using `TenantAwareClientsModule`, the `_tenantSlug` is automatically injected. For the initial `BOOTSTRAP_TENANT` call (which creates the tenant), the slug is passed explicitly.
+- Bootstrap is a one-shot application context and calls `process.exit(0|1)` after completion/failure.
+- A top-level dependency or seeder failure aborts the process with exit code `1`; logs identify run id, stage, status, and error class without serializing the underlying error. Bootstrap emits one redacted schema-v1 record per tenant; the Desktop tooling consumes it while keeping legacy warning signals separate and persists a separate authoritative Mongo totals report. Only steps marked `countAuthority: operation` may expose mutation counts.
+- Several seeder internals catch missing optional records and continue, so a successful process exit does not by itself prove every optional demo/enrichment artifact was created.
+- Bootstrap must not become the only place where domain invariants live; runtime services still need to validate their own contracts.
+- Docker Desktop runtime evidence covers preserved-failure recovery, deadline and owner-absent failures, warning-free ACME/Globex/Initech runs, and duplicate-free reruns. Initech v1/v2 keeps 16 tenant-owned databases, 36 collections, and 2,973 documents identical. Two simultaneous Initech Jobs produce exactly one successful run and one lock-stage failure before the seeder; the winner preserves the same database totals and the proof resources are removed. Explicit Jobs must retain the established `cucu-bootstrap` release identity so the NetworkPolicy selects them; a differently named release fails dependency readiness before seed. Orion is not a fixture on this branch, and the remaining unconverted per-step outcomes stay tracked by CUC-251/CUC-430.

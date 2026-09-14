@@ -337,7 +337,9 @@ sequenceDiagram
     Auth-->>FE: {success: true}
 ```
 
-Both the tenant DB and platform DB password hashes are updated. The platform DB is the source of truth for login; the tenant DB copy is kept for backward compatibility.
+Current code updates the tenant `users` password mirror first and then attempts to update the Tenants platform identity. The platform DB is the source of truth for login; the tenant DB copy is kept for backward compatibility.
+
+Code-current caveat: the Tenants `user_identities.passwordHash` update is best effort. If the platform sync fails, the mutation can still return success even though login continues to use the previous platform password until reconciliation. The remediation track is CUC-285..CUC-292.
 
 ## Cookie Configuration
 

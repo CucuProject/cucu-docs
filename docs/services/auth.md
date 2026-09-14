@@ -1,305 +1,301 @@
 # Auth Service
 
-The Auth service is the **authentication orchestrator** for the platform. It manages **server-side sessions**, **JWT token issuance**, **refresh token rotation**, and coordinates with Tenants and Grants services for identity resolution and permission loading. It stores sessions in a per-tenant MongoDB database and caches group IDs in Redis.
+The Auth service owns Cucu authentication state: server-side sessions, JWT issuance, refresh-token rotation, password changes, and the orchestration needed by the Gateway to build a trusted user context.
 
-## Overview
+It stores sessions in tenant databases and coordinates with Tenants, Users, Grants, and Audit through Redis RPC/events.
+
+## Service Profile
 
 | Property | Value |
-|----------|-------|
-| Port | 3001 |
+|---|---|
+| Runtime | NestJS subgraph + Redis RPC |
+| Public port | `3001` |
 | Database | `auth_{tenantSlug}` |
 | Collection | `sessions` |
-| Module | `AuthModule` |
-| Context | `AuthContext` (request-scoped) |
+| App module | `apps/auth/src/auth.module.ts` |
+| Context | `AuthContext` |
 
-### Domain Entities
+## Responsibilities
 
-| Entity | Description |
-|--------|-------------|
-| `Session` | Server-side session record with device info, tokens, and timestamps |
+- Validate Gateway access tokens via `VERIFY_ACCESS_TOKEN`.
+- Validate refresh tokens via `VERIFY_FROM_TOKEN`.
+- Return current authenticated user state via `GET_ME`.
+- Rotate refresh tokens via `REFRESH_FROM_TOKEN`.
+- Switch tenant context via `SWITCH_FROM_TOKEN`.
+- Create or reuse sessions after the Gateway verifies credentials through Tenants.
+- Expose GraphQL operations for session listing, revocation, logout, and password change.
+- Apply field-level filtering on `Session`.
+- Emit security audit events for login and token/session anomalies.
 
-## Architecture
+## Functional Role
 
-### Module Structure
+Auth is the session authority for Cucu. It turns a credential that Tenants has already verified into a server-side session, access token, refresh token, and tenant-scoped identity context. It also owns the security response when a token/session looks suspicious.
 
+Primary actors:
+
+- Gateway, which calls Auth for login/session lifecycle and access-token validation.
+- End users managing sessions, logout, and password changes through GraphQL/REST.
+- Tenants, which owns Universal Auth identities and membership checks.
+- Users, which supplies group ids and receives password-hash updates.
+- Audit, which receives login and token anomaly events.
+
+Key enabled flows:
+
+- Login session creation/reuse after Gateway verifies password with Tenants.
+- Access-token validation for every authenticated Gateway GraphQL request.
+- Refresh rotation with reuse detection, device fingerprint checks, and idle/max-age enforcement.
+- Password change with tenant DB update, best-effort platform identity sync, session revocation, and group-cache invalidation.
+- Tenant switching by validating the current refresh session, checking target membership, and issuing a new token pair.
+
+## Main Modules
+
+| Module/File | Purpose |
+|---|---|
+| `auth.module.ts` | Tenant DB, Redis cache DB=1, GraphQL federation, JWT RS256, guards/interceptors. |
+| `auth.controller.ts` | Redis message/event handlers. |
+| `auth.resolver.ts` | GraphQL API for sessions/password/logout. |
+| `auth-orchestrator.service.ts` | Gateway-facing consolidated auth flows. |
+| `session.service.ts` | Session creation, reuse, validity, revocation and projections. |
+| `token.service.ts` | Refresh rotation, group cache, token reuse detection. |
+| `password.service.ts` | Password change and session invalidation. |
+| `schemas/session.schema.ts` | Tenant MongoDB session schema and indexes. |
+
+## Session Model
+
+| Field | GraphQL | Purpose |
+|---|---:|---|
+| `_id` | yes | Session id embedded in JWTs. |
+| `userId` | yes | Session owner. |
+| `refreshToken` | no | Hash of the active refresh token. |
+| `deviceFingerprint` | no | Refresh-device binding. |
+| `revokedAt` | yes | Explicit or logical revocation timestamp. |
+| `ip` | yes | Last known session IP. |
+| `deviceName` | yes | Device parsed from user-agent. |
+| `browserName` | yes | Browser parsed from user-agent. |
+| `expiresAt` | yes | Refresh-token expiry. |
+| `sessionStart` | yes | Session lifetime start. |
+| `lastActivity` | yes | Debounced session activity timestamp. |
+| `tenantId` | no | Defense-in-depth tenant reference. |
+
+Indexes:
+
+- `{ userId, deviceFingerprint, revokedAt }` for session reuse.
+- `{ userId, revokedAt }` for listing and batch revocation.
+
+## Gateway-Facing RPC
+
+| Pattern | Input | Output | Used by |
+|---|---|---|---|
+| `VERIFY_ACCESS_TOKEN` | `{ accessToken }` | Validated user/session context or invalid reason | Gateway Bearer middleware. |
+| `VERIFY_FROM_TOKEN` | `{ refreshToken }` | `{ valid, userId, groups, isPlatformAdmin, memberships }` | `/auth/verify`. |
+| `GET_ME` | `{ refreshToken }` | `{ authenticated, user, permissions }` | `/auth/me`. |
+| `REFRESH_FROM_TOKEN` | `{ refreshToken, deviceFingerprint?, ip? }` | New token pair + enrichment | `/auth/refresh`. |
+| `SWITCH_FROM_TOKEN` | `{ refreshToken, targetTenantSlug }` | New token pair + target tenant | `/auth/switch`. |
+| `CREATE_AUTHENTICATED_SESSION` | Verified identity + request metadata | Access token, refresh token, session id | `/auth/login`. |
+
+## Internal RPC and Events
+
+| Pattern | Kind | Purpose |
+|---|---|---|
+| `CHECK_SESSION` | Message | Legacy/fallback session check. |
+| `REVOKE_SESSION` | Message | Revoke one session, optionally forced. |
+| `REFRESH_SESSION` | Message | Internal refresh rotation entrypoint. |
+| `SWITCH_SESSION_TENANT` | Message | Re-issue tokens for an existing session in a new tenant context. |
+| `USER_DELETED` | Event | Revoke all sessions for a deleted user. |
+| `REVOKE_ALL_SESSIONS` | Event | Revoke all sessions for a user. |
+
+Outbound dependencies:
+
+- Tenants: `CHECK_PLATFORM_ADMIN`, `GET_IDENTITY_MEMBERSHIPS`, `SWITCH_TENANT`, `UPDATE_IDENTITY_PASSWORD`.
+- Users: `FIND_GROUPIDS_BY_USERID`, `FIND_USER_WITH_PASSWORD`, `UPDATE_USER_PASSWORD`.
+- Grants: `GET_MY_PERMISSIONS`.
+- Audit: `AUDIT_EVENT`.
+
+## GraphQL API
+
+| Type | Name | Args | Notes |
+|---|---|---|---|
+| Query | `findAllSessions` | none | Current user's sessions with field filtering. |
+| Query | `findSessionsByUserId` | `userId` | Scope `self` restricts access to own sessions. |
+| Mutation | `revokeSession` | `input.sessionId` | Self-scope enforces session ownership. |
+| Mutation | `revokeUserSessions` | `userId?` | Defaults to current user; permission handled by `OperationGuard`. |
+| Mutation | `changePassword` | `currentPassword`, `newPassword` | Updates password and revokes active sessions. |
+| Mutation | `logout` | `input.sessionId` | Revokes own session. |
+| ResolveField | `Session.user` | parent session | Federation stub for `User`. |
+
+## Core Business Flows
+
+### Access Token Validation
+
+`AuthOrchestratorService.verifyAccessToken()` is the Gateway's source of truth:
+
+1. Verify JWT signature and expiry.
+2. Require `type === "access"`.
+3. Require `sessionId`.
+4. Run session validation in tenant context when `tenantSlug` is present.
+5. Return only validated identity/session/group/tenant data to the Gateway.
+
+Session validation checks session existence, revocation, idle timeout, max age, and group ids. It does not re-check the current Users `active`/`deletedAt` state on every request. User deactivation therefore relies on the `REVOKE_ALL_SESSIONS` event from Users; that reliability gap is tracked in CUC-270..CUC-276.
+
+### Session Creation
+
+The Gateway verifies credentials through Tenants first. Auth receives a verified identity and request metadata:
+
+1. Load group ids from Users.
+2. Look for an active session by `(userId, deviceFingerprint)`.
+3. Reuse the session when it is still inside idle/max-age limits.
+4. Otherwise enforce the concurrent session limit and create a new session.
+5. Pre-generate the session `_id` before signing JWTs.
+6. Store only the hashed refresh token.
+7. Emit `LOGIN_SUCCESS`.
+
+IP is intentionally excluded from the reuse lookup to avoid unnecessary session churn when the network changes.
+
+### Refresh Token Rotation
+
+`TokenService.refreshToken()`:
+
+1. Verify refresh token and `type === "refresh"`.
+2. Resolve tenant context from token payload.
+3. Load the session.
+4. Reject missing or revoked sessions.
+5. Compare stored hash with the presented refresh token.
+6. On mismatch, revoke the session and emit `TOKEN_REUSE_DETECTED`.
+7. Validate device fingerprint when provided.
+8. Log IP changes without blocking.
+9. Enforce idle timeout and max age.
+10. Load group ids and sign a new access/refresh pair.
+11. Store the hash of the new refresh token.
+
+### Password Change
+
+`PasswordService.changePassword()`:
+
+1. Load current password hash from Users.
+2. Verify the current password with bcrypt.
+3. Hash the new password.
+4. Update the tenant DB through Users.
+5. Best-effort sync the platform DB through Tenants.
+6. Revoke all active sessions.
+7. Clear tenant-scoped group cache when tenant context is available.
+
+This is not currently atomic. Login uses the Tenants platform identity as source of truth, while the blocking write is the Users tenant password mirror. If `UPDATE_IDENTITY_PASSWORD` fails after `UPDATE_USER_PASSWORD`, the GraphQL mutation can still return success while future login keeps using the old platform password until reconciliation. The fix track is CUC-285..CUC-292.
+
+## Audit Events
+
+| Event | Severity | Trigger |
+|---|---|---|
+| `LOGIN_SUCCESS` | `info` | Session created or reused after valid login. |
+| `TOKEN_REUSE_DETECTED` | `critical` | Old refresh token reused after rotation. |
+| `DEVICE_FINGERPRINT_MISMATCH` | `high` | Refresh attempted from a different device fingerprint. |
+| `IP_CHANGED_ON_REFRESH` | `low` | Refresh came from a different IP. |
+| `SESSION_IDLE_REVOKED` | `info` | Idle timeout exceeded. |
+| `SESSION_MAX_AGE_REVOKED` | `info` | Max session age exceeded. |
+
+## Cache
+
+Auth uses Redis DB=1 for group ids:
+
+```text
+groups:{tenantSlug}:{userId}
 ```
-AuthModule
-├── TenantDatabaseModule.forService('auth')
-├── ConfigModule (global)
-├── TenantAwareClientsModule
-│   ├── USERS_SERVICE
-│   ├── GRANTS_SERVICE
-│   └── TENANTS_SERVICE
-├── MicroservicesOrchestratorModule
-├── ThrottlerModule (5 req/15min per IP)
-├── CacheModule (Redis-backed, DB=1, TTL=1h)
-├── GraphQLModule (ApolloFederationDriver)
-└── JwtModule (JWT_SECRET, JWT_EXPIRES_IN)
 
-Controller: AuthController (RPC handlers)
-Providers:
-├── AuthContext (SUBGRAPH_CONTEXT)
-├── AuthOrchestratorService    ← NEW: Consolidates auth flows
-├── AuthService
-├── AuthResolver
-├── TokenService               ← Handles JWT signing/rotation
-├── SessionService             ← Session CRUD operations
-├── PasswordService            ← Password change flow
-├── LocalSchemaFieldsService
-├── PermissionsCacheService
-├── AuthThrottlerGuard (APP_GUARD)
-├── OperationGuard (APP_GUARD)
-└── ViewFieldsInterceptor (APP_INTERCEPTOR for Session)
-```
+TTL is 3600 seconds. Tenant slug is part of the key to avoid cross-tenant pollution.
 
-### Orchestrator Pattern
+`TokenService.getGroupIds()` returns an empty group list when the Users `FIND_GROUPIDS_BY_USERID` RPC fails. That is fail-closed for permissions but can silently degrade the user context. Group cache invalidation and fail-policy hardening are tracked in CUC-277..CUC-284.
 
-The Auth service acts as the **central orchestrator** for authentication flows. The Gateway delegates all auth logic to Auth via consolidated RPC patterns:
+## Invariants
 
-```
-Gateway (thin proxy)           Auth Service (orchestrator)
-    │                               │
-    │  VERIFY_FROM_TOKEN           │
-    │  ───────────────────────────►│
-    │                               ├─► Validate JWT
-    │                               ├─► CHECK_SESSION (internal)
-    │                               ├─► GET_IDENTITY_MEMBERSHIPS → Tenants
-    │                               └─► Return { user, tenants, permissions }
-    │                               │
-    │  GET_ME                      │
-    │  ───────────────────────────►│
-    │                               ├─► Validate session
-    │                               ├─► Load user data
-    │                               └─► Return { me, session }
-    │                               │
-    │  REFRESH_FROM_TOKEN          │
-    │  ───────────────────────────►│
-    │                               ├─► Validate refresh token
-    │                               ├─► Rotate tokens
-    │                               └─► Return { accessToken, refreshToken }
-```
+- Refresh tokens are never stored in clear text.
+- Session `_id` is generated before JWT signing so token and DB session agree.
+- Access tokens are not trusted by the Gateway until Auth validates token and session.
+- Refresh-token reuse revokes the entire session.
+- Group ids are runtime claims, not the source of truth.
+- GraphQL session fields are filtered through field-level grants.
+- RPC DTOs are validated with formal DTO classes.
 
-This pattern:
-- Keeps Gateway as a **thin proxy** with no auth logic
-- Centralizes all identity resolution in Auth service
-- Reduces RPC round-trips (Auth calls Tenants/Grants internally)
-- Simplifies Gateway code and testing
+## Failure Modes
 
-### Redis Cache
+- Refresh-token hash mismatch is treated as token reuse: Auth revokes the session, emits `TOKEN_REUSE_DETECTED`, and rejects the refresh.
+- Device fingerprint mismatch blocks refresh and emits `DEVICE_FINGERPRINT_MISMATCH`.
+- Idle timeout or max session age revokes the session during refresh/validation.
+- `GET_MY_PERMISSIONS` or membership enrichment failures degrade `/auth/me`/refresh enrichment but do not make Gateway trust unvalidated tokens.
+- Platform DB password sync during `changePassword` is best effort; tenant `users` update and session revocation are the blocking path.
+- Deactivation revocation depends on receiving `REVOKE_ALL_SESSIONS`; missed events can leave sessions valid until they are otherwise revoked or expire.
+- Group lookup failure during token/session refresh currently degrades to an empty group list, not a retried or surfaced dependency error.
 
-The Auth service uses a dedicated Redis database (DB=1) for caching group IDs:
+## Docs vs Code Notes
 
-```
-Key: groups:{userId}
-Value: string[] (JSON)
-TTL: 3600 seconds (1 hour)
-```
+- `CHECK_SESSION` still exists as legacy/fallback RPC, but Gateway's primary Bearer validation path is `VERIFY_ACCESS_TOKEN`.
+- Password source of truth for login is Tenants `user_identities.passwordHash`; Auth changes tenant user password first and then attempts platform sync.
+- The critical code-audit backlog for Auth is CUC-270..CUC-276, CUC-277..CUC-284, CUC-285..CUC-292, and CUC-293..CUC-300.
 
-## GraphQL Schema
+## Examples
 
-### Queries
+### `VERIFY_ACCESS_TOKEN`
 
-| Query | Args | Return | Description |
-|-------|------|--------|-------------|
-| `findAllSessions` | — | `[Session]!` | Returns all sessions for the current authenticated user |
-| `findSessionsByUserId` | `userId: ID!` | `[Session]!` | Returns active sessions for a specific user. Scope enforcement: `self` scope restricts to own sessions only |
+Input:
 
-### Mutations
-
-| Mutation | Args | Return | Description |
-|----------|------|--------|-------------|
-| `logout` | `input: LogoutInput!` | `Boolean!` | Revoke a single session by sessionId |
-| `revokeSession` | `input: RevokeSessionInput!` | `Boolean!` | Revoke a session. Scope: `self` requires own session |
-| `revokeUserSessions` | `userId: ID` | `Boolean!` | Revoke all active sessions for a user (nullable userId defaults to self) |
-| `changePassword` | `input: ChangePasswordInput!` | `Boolean!` | Change password, revoke all sessions, sync to platform DB |
-
-### ResolveField
-
-| Field | On | Returns | Description |
-|-------|-----|---------|-------------|
-| `user` | `Session` | `User` (federation stub) | Returns `{ __typename: 'User', _id: session.userId }` |
-
-## RPC Patterns
-
-### Orchestrator Patterns (Gateway → Auth)
-
-These consolidated patterns are called by the Gateway's thin proxy endpoints:
-
-| Pattern | Input | Output | Description |
-|---------|-------|--------|-------------|
-| `VERIFY_FROM_TOKEN` | `{refreshToken}` | `{valid, userId, groups, isPlatformAdmin, memberships}` | Validate refresh token + session, load identity memberships. Called by `/auth/verify` (Gateway decodes refresh token for tenantSlug, uses `TenantContextService.run()` for CLS context) |
-| `GET_ME` | `{refreshToken}` | `{authenticated, user, permissions}` | Load current user profile, permissions. Called by `/auth/me` (same CLS pattern as verify) |
-| `REFRESH_FROM_TOKEN` | `{refreshToken}` | `{accessToken, refreshToken, expiresIn}` | Rotate tokens, return new pair. Called by `/auth/refresh` (same CLS pattern) |
-| `SWITCH_FROM_TOKEN` | `{refreshToken, targetTenantSlug}` | `{accessToken, refreshToken, userId, tenantSlug}` | Switch tenant context, re-issue tokens. Called by `/auth/switch` |
-
-### Session Patterns (Internal)
-
-| Pattern | Input | Output | Description |
-|---------|-------|--------|-------------|
-| `LOGIN` | `{email, password, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | **Deprecated** — legacy login via tenant DB |
-| `CREATE_AUTHENTICATED_SESSION` | `{userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Create/reuse session after platform DB verification |
-| `CHECK_SESSION` | `{sessionId}` | `{isValid, userId?, groupIds?, reason?}` | Validate session (called on every request by `createJwtAuthMiddleware` in the Gateway) |
-| `REFRESH_SESSION` | `{refreshToken}` | `{accessToken, refreshToken, userId, sessionId, expiresIn}` | Rotate tokens (internal, called by orchestrator) |
-| `REVOKE_SESSION` | `{sessionId, requestUserId, force}` | void | Revoke single session |
-| `SWITCH_SESSION_TENANT` | `{sessionId, userId, tenantSlug, tenantId, email}` | `{accessToken, refreshToken}` | Re-issue tokens for tenant switch (internal) |
-
-### EventPattern (Fire-and-Forget)
-
-| Pattern | Input | Action |
-|---------|-------|--------|
-| `USER_DELETED` | `{userId}` | Revoke all sessions + clear group cache |
-| `REVOKE_ALL_SESSIONS` | `{userId}` | Revoke all sessions + clear group cache |
-
-### Outbound RPC Calls
-
-| Target | Pattern | Purpose |
-|--------|---------|---------|
-| **Tenants** | `CHECK_PLATFORM_ADMIN` | Check if user is platform admin (orchestrator) |
-| **Tenants** | `GET_IDENTITY_MEMBERSHIPS` | Load user's tenant memberships (orchestrator) |
-| **Tenants** | `SWITCH_TENANT` | Validate and execute tenant switch |
-| **Tenants** | `UPDATE_IDENTITY_PASSWORD` | Change password — sync to platform DB |
-| **Grants** | `GET_MY_PERMISSIONS` | Load permissions for current tenant context |
-| Users | `FIND_GROUPIDS_BY_USERID` | Load group IDs for JWT claims (cache miss) |
-| Users | `FIND_USER_BY_EMAIL` | Legacy login — find user with password |
-| Users | `FIND_USER_WITH_PASSWORD` | Change password — get current hash |
-| Users | `UPDATE_USER_PASSWORD` | Change password — update tenant DB |
-
-## Session Schema
-
-```typescript
-Session {
-  _id: ObjectId           // Pre-generated for JWT embedding
-  userId: string          // @Field
-  refreshToken: string    // NOT exposed via GraphQL
-  deviceFingerprint: string // NOT exposed via GraphQL
-  createdAt?: Date        // @Field(nullable)
-  updatedAt?: Date        // @Field(nullable)
-  revokedAt?: Date        // @Field(nullable) — set when revoked
-  ip?: string             // @Field(nullable)
-  deviceName?: string     // @Field(nullable) — e.g., "macOS 14.3"
-  browserName?: string    // @Field(nullable) — e.g., "Chrome 134"
-  expiresAt?: Date        // @Field(nullable) — refresh token expiry
-  sessionStart: Date      // @Field — when session was first created
-  lastActivity: Date      // @Field — updated on CHECK_SESSION
-  tenantId?: string       // Defence-in-depth (not exposed)
+```json
+{
+  "accessToken": "eyJ..."
 }
 ```
 
-### Indexes
+Valid response:
 
-| Fields | Type | Purpose |
-|--------|------|---------|
-| `{userId, ip, deviceFingerprint, revokedAt}` | Compound | Session reuse lookup |
-| `{userId, revokedAt}` | Compound | Session listing + batch revocation |
-
-## Business Logic
-
-### Session Reuse
-
-Sessions are identified by `(userId, ip, deviceFingerprint)`. If a valid session exists for this triple, it's reused instead of creating a new one. This prevents session explosion from page reloads.
-
-### Token Pre-generation
-
-The session `_id` is pre-generated as `new Types.ObjectId()` before the JWT is signed. This allows the `sessionId` to be embedded in the JWT **before** the session document is saved to MongoDB — ensuring atomicity.
-
-### Group ID Caching
-
-Group IDs are cached in Redis (DB=1, TTL=1h) to avoid RPC calls to Users on every request:
-
-```
-1. Check cache: groups:{userId}
-2. Cache hit → return cached groupIds
-3. Cache miss → RPC FIND_GROUPIDS_BY_USERID → cache result → return
-```
-
-Cache is invalidated when:
-- User is deleted (`revokeAllSessionsOfUser` calls `cacheManager.del`)
-- Password is changed (all sessions revoked + cache cleared)
-
-### Password Complexity Validation
-
-The `ChangePasswordInput` DTO enforces password complexity via `@IsStrongPassword()` from `@cucu/service-common/validators`:
-
-```typescript
-@InputType()
-export class ChangePasswordInput {
-  @IsNotEmpty()
-  @IsString()
-  currentPassword: string;
-
-  @IsNotEmpty()
-  @IsString()
-  @MinLength(8)
-  @MaxLength(128)
-  @IsStrongPassword()   // ← from @cucu/service-common
-  newPassword: string;
+```json
+{
+  "valid": true,
+  "userId": "665...",
+  "sessionId": "665...",
+  "groupIds": ["665..."],
+  "tenantSlug": "acme",
+  "tenantId": "665...",
+  "email": "admin@acme.test"
 }
 ```
 
-**Complexity requirements** (enforced by `PASSWORD_COMPLEXITY_REGEX`):
-- At least one uppercase letter
-- At least one lowercase letter
-- At least one digit
-- At least one special character (`!@#$%^&*()_+-=[]{}|;:,.<>?`)
+Invalid response:
 
-::: info DEV_MODE bypass
-When `DEV_MODE=true`, password complexity validation is skipped to simplify development workflows.
-:::
-
-### Password Change Flow
-
-1. `FIND_USER_WITH_PASSWORD` RPC → get current hash + email
-2. `bcrypt.compare(currentPassword, hash)` — verify current
-3. `bcrypt.hash(newPassword)` → generate new hash
-4. `UPDATE_USER_PASSWORD` → update tenant DB (backward compat)
-5. `UPDATE_IDENTITY_PASSWORD` → update platform DB (source of truth)
-6. Revoke all active sessions → force re-login
-
-### RPC DTO Validation
-
-All RPC handlers use formal DTOs with `class-validator` decorators, validated by the global `ValidationPipe` (configured in `createSubgraphMicroservice`):
-
-| DTO | Pattern | Fields |
-|-----|---------|--------|
-| `CheckSessionRpcDto` | `CHECK_SESSION` | `sessionId` |
-| `RevokeSessionRpcDto` | `REVOKE_SESSION` | `sessionId, requestUserId, force` |
-| `LoginRpcDto` | `LOGIN` | `email, password, ip, deviceName, browserName, deviceFingerprint` |
-| `CreateAuthenticatedSessionRpcDto` | `CREATE_AUTHENTICATED_SESSION` | `userId, email, tenantSlug?, tenantId?, ip, deviceName, browserName, deviceFingerprint` |
-| `RefreshSessionRpcDto` | `REFRESH_SESSION` | `refreshToken` |
-| `SwitchSessionTenantRpcDto` | `SWITCH_SESSION_TENANT` | `sessionId, userId, tenantSlug, tenantId, email` |
-| `UserDeletedRpcDto` | `USER_DELETED` / `REVOKE_ALL_SESSIONS` | `userId` |
-| `VerifyFromTokenRpcDto` | `VERIFY_FROM_TOKEN` / `GET_ME` | `refreshToken` |
-| `RefreshFromTokenRpcDto` | `REFRESH_FROM_TOKEN` | `refreshToken, deviceFingerprint?, ip?` |
-| `SwitchFromTokenRpcDto` | `SWITCH_FROM_TOKEN` | `refreshToken, targetTenantSlug` |
-
-The `TenantClsInterceptor` strips `_tenantSlug` and `_internalSecret` from RPC payloads **before** `ValidationPipe` runs, so DTOs only declare business fields.
-
-### Throttling
-
-The `AuthThrottlerGuard` applies rate limiting specifically to the Auth service:
-- **5 requests per 15 minutes** per IP (configurable via `AUTH_THROTTLE_TTL`, `AUTH_THROTTLE_LIMIT`)
-- All RPC handlers are decorated with `@SkipThrottle()` — only GraphQL/HTTP is throttled
-
-## Field-Level Permissions
-
-The Auth service applies field filtering on the `Session` entity:
-
-```typescript
-@UseInterceptors(createViewFieldsInterceptor(['Session']))
-@Query(() => [Session])
-async findAllSessions(@ViewableFields('Session') viewable: Set<string>) {
-  return this.authService.findAllSessions(viewable);
+```json
+{
+  "valid": false,
+  "reason": "Invalid or expired access token"
 }
 ```
 
-The service builds a Mongoose projection from viewable fields:
+### `changePassword`
 
-```typescript
-private getViewableProjection(entity: string, viewable?: Set<string>): any {
-  if (viewable && viewable.size > 0) return buildMongooseProjection(viewable);
-  if (this.actx?.isInternalCall() && !this.actx?.hasUserContext()) return undefined;
-  const set = this.permCache.getViewableFieldsForEntity(entity);
-  if (!set.size) throw new ForbiddenException('No viewable fields');
-  return buildMongooseProjection(set);
+```graphql
+mutation ChangePassword($input: ChangePasswordInput!) {
+  changePassword(input: $input)
 }
 ```
+
+```json
+{
+  "input": {
+    "currentPassword": "OldStr0ng!",
+    "newPassword": "NewStr0ng!"
+  }
+}
+```
+
+## Source References
+
+- `apps/auth/src/auth.module.ts`
+- `apps/auth/src/auth.controller.ts`
+- `apps/auth/src/auth.resolver.ts`
+- `apps/auth/src/auth-orchestrator.service.ts`
+- `apps/auth/src/session.service.ts`
+- `apps/auth/src/token.service.ts`
+- `apps/auth/src/password.service.ts`
+- `apps/auth/src/schemas/session.schema.ts`
+
+## Relevant Tests
+
+- `apps/auth/tests/auth-controller.spec.ts`
+- `apps/auth/tests/auth-service.spec.ts`
+- `apps/auth/tests/auth-orchestrator.spec.ts`
+- `apps/auth/tests/auth-resolver.spec.ts`

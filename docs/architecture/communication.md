@@ -163,12 +163,12 @@ With multi-tenancy, services use `TenantAwareClientsModule.registerAsync()` inst
 | `GROUP_UPDATED` | Message | `{groupId, userIds}` | — | Sync assignments on group update |
 | `GROUP_DELETED` | Message | `{groupId}` | — | Delete all assignments for group |
 
-### MilestoneToUser Service
+### MilestoneToResource Service
 
 | Pattern | Type | Input | Output | Purpose |
 |---------|------|-------|--------|---------|
-| `FIND_MILESTONE_TO_USER_BY_USER_ID` | Message | `string` | `{_id}[]` | User's milestone assignments |
-| `FIND_MILESTONE_TO_USER_BY_MILESTONE_ID` | Message | `string` | `{_id}[]` | Milestone's assigned users |
+| `FIND_MILESTONE_TO_RESOURCE_BY_USER_ID` | Message | `string` | `{_id}[]` | User's milestone assignments |
+| `FIND_MILESTONE_TO_RESOURCE_BY_MILESTONE_ID` | Message | `string` | `{_id}[]` | Milestone's assigned users |
 | `USER_CREATED` | Event | `{userId, assignedMilestoneIds}` | — | Create assignments |
 | `USER_UPDATED` | Event | `{userId, assignedMilestoneIds}` | — | Sync assignments |
 | `USER_DELETED` | Event | `{userId}` | — | Delete all assignments |

@@ -32,7 +32,7 @@ export class XxxContext extends BaseSubgraphContext {
 }
 ```
 
-**Context files:** `GrantsContext`, `UsersContext`, `OrganizationContext`, `TenantsContext`, `ProjectsContext`, `MilestonesContext`, `HolidaysContext`, `GroupAssignmentsContext` (`GaContext`), `MilestoneToProjectContext` (`M2pContext`), `MilestoneToUserContext` (`M2uContext`), `ProjectAccessContext`.
+**Context files:** `GrantsContext`, `UsersContext`, `OrganizationContext`, `TenantsContext`, `ProjectsContext`, `MilestonesContext`, `HolidaysContext`, `GroupAssignmentsContext` (`GaContext`), `MilestoneToProjectContext` (`M2pContext`), `MilestoneToResourceContext` (`M2uContext`), `ProjectAccessContext`.
 
 The old `TenantContext` (static AsyncLocalStorage wrapper), `TenantInterceptor`, and `TenantGraphqlMiddleware` have been fully replaced by `nestjs-cls`-based equivalents.
 :::

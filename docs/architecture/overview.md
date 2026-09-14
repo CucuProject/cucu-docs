@@ -29,7 +29,7 @@ The Cucu platform is a **multi-tenant, distributed microservices architecture** 
 | **users** | 3002 | `users_{tenant}` | User CRUD, profiles (AuthData, PersonalData, EmploymentData) |
 | **projects** | 3003 | `projects_{tenant}` | Project management, templates |
 | **milestones** | 3004 | `milestones_{tenant}` | Milestone CRUD, status tracking, dependencies |
-| **milestone-to-user** | 3005 | `milestone-to-user_{tenant}` | N:N user↔milestone assignments, resource daily allocations |
+| **milestone-to-resource** | 3005 | `milestone-to-resource_{tenant}` | N:N user↔milestone assignments, resource daily allocations |
 | **milestone-to-project** | 3006 | `milestone-to-project_{tenant}` | N:N project↔milestone assignments |
 | **group-assignments** | 3007 | `group-assignments_{tenant}` | N:N user↔group assignments |
 | **project-access** | 3008 | `project-access_{tenant}` | Project-level role-based access control |
@@ -59,7 +59,7 @@ graph TB
         USERS[Users :3002]
         PROJECTS[Projects :3003]
         MILESTONES[Milestones :3004]
-        M2U[MilestoneToUser :3005]
+        MTR[MilestoneToResource :3005]
         M2P[MilestoneToProject :3006]
         GA[GroupAssignments :3007]
         PA[ProjectAccess :3008]
@@ -78,7 +78,7 @@ graph TB
 
     Client -->|HTTPS| GW
     GW -->|Redis RPC| AUTH
-    GW -->|Federation HTTP| AUTH & USERS & PROJECTS & MILESTONES & M2U & M2P & GA & PA & GRANTS & ORG & HOLIDAYS & TENANTS
+    GW -->|Federation HTTP| AUTH & USERS & PROJECTS & MILESTONES & MTR & M2P & GA & PA & GRANTS & ORG & HOLIDAYS & TENANTS
 
     AUTH -->|emit AUDIT_EVENT| AUDIT
     AUDIT --> MONGODB
@@ -130,7 +130,7 @@ sequenceDiagram
     participant US as Users Service
     participant Redis as Redis Pub/Sub
     participant Auth as Auth Service
-    participant M2U as MilestoneToUser
+    participant MTR as MilestoneToResource
     participant GA as GroupAssignments
 
     Resolver->>US: removeUser(userId)
@@ -141,8 +141,8 @@ sequenceDiagram
         Redis->>Auth: USER_DELETED
         Auth->>Auth: revokeAllSessionsOfUser
     and
-        Redis->>M2U: USER_DELETED
-        M2U->>M2U: deleteAssignmentsForUser
+        Redis->>MTR: USER_DELETED
+        MTR->>MTR: deleteAssignmentsForUser
     and
         Redis->>GA: USER_DELETED
         GA->>GA: deleteGroupAssignmentsForUser
@@ -182,11 +182,11 @@ graph LR
     AUTH --> TENANTS
     
     USERS --> GA[GroupAssignments]
-    USERS --> M2U[MilestoneToUser]
+    USERS --> MTR[MilestoneToResource]
     USERS --> ORG[Organization]
     USERS --> AUTH
     
-    MILESTONES[Milestones] --> M2U
+    MILESTONES[Milestones] --> MTR
     MILESTONES --> M2P[MilestoneToProject]
     
     PROJECTS[Projects] --> M2P

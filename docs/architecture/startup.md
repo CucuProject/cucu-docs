@@ -209,8 +209,9 @@ flowchart TD
 
 1. **RPC-based seeding** — Bootstrap doesn't access databases directly; it calls services via Redis RPC. This ensures all business logic (validation, events) runs correctly.
 2. **Idempotent** — Each seeder checks if data already exists before creating. Safe to run multiple times.
-3. **RpcInternalGuard** — Bootstrap uses `_internalSecret` in payloads to authenticate to protected endpoints.
+3. **Internal RPC authentication** — Legacy calls still carry `_internalSecret`. On the CUC-430 Kubernetes path, allowlisted mutating RPCs also use signed envelopes derived from a dedicated owner-mounted signing file; the runtime trims mounted values and fails closed when either credential is missing.
 4. **Multi-tenant aware** — Bootstrap creates tenants first, then seeds data within each tenant's context.
+5. **Explicit Kubernetes runs** — The Kubernetes seeder is rendered as an immutable Job with a unique run id and applied explicitly; it is not a Helm hook.
 
 ## Gateway Bootstrap
 

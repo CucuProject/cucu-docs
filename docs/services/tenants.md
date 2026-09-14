@@ -139,7 +139,7 @@ Public signup/check/status endpoints live at the Gateway and proxy to Tenants RP
 8. It marks the tenant `active` and sets the trial expiry.
 9. On failure, it drops created databases, removes the membership, and marks `provisioning_failed`.
 
-The service list used by provisioning is a code-owned allowlist. When new tenant-scoped services are added, the allowlist and service indexes must be updated together or a new tenant can be born without the expected database/index footprint. The current remediation track is CUC-182..CUC-191.
+The service list used by provisioning is a code-owned allowlist. The CUC-430 Kubernetes path deliberately wires the same nine historical baseline services through owner-scoped username/password files and a TLS CA; it preserves each Mongo URI query instead of silently dropping TLS options. This does not expand the provisioning registry to all nineteen runtime services. When new tenant-scoped services are added, the allowlist and service indexes must be updated together or a new tenant can be born without the expected database/index footprint. The current remediation track is CUC-182..CUC-191.
 
 ### Universal Auth
 
@@ -161,7 +161,7 @@ Progressive lockout:
 
 ## Failure Modes
 
-- Signup provisioning failure leaves a tenant record with `status: provisioning_failed`; status polling surfaces the failure while rollback drops DBs created during that provisioning run.
+- Signup provisioning failure leaves a tenant record with `status: provisioning_failed`; status polling surfaces the failure while rollback drops DBs created during that provisioning run. `BOOTSTRAP_TENANT` retries only this failed state for the same owner email, skips only `active`/`trial`, and fails closed for other existing states.
 - Login with valid password but no membership for the requested tenant fails; email identity alone is insufficient.
 - Lockout blocks login until `lockoutUntil`, then expired lockout state is reset.
 - Missing/invalid `x-internal-resolve` rejects frontend middleware tenant resolve.
@@ -204,7 +204,7 @@ Valid `VERIFY_IDENTITY_PASSWORD` response:
 
 ## Notes and Risks
 
-- The provisioning service currently creates DBs for a historical subset of tenant services and does not include newer runtime services such as roadmaps, rates, resources, ai-agents, holidays, or milestone-to-resource.
+- The provisioning service currently creates DBs for a historical subset of tenant services and does not include newer runtime services such as roadmaps, rates, resources, ai-agents, holidays, or milestone-to-resource. Docker Desktop evidence covers failed-state recovery for ACME and a fresh Globex provision; Orion and the broader registry remain open work.
 - `Tenant.userCount` returns `0`.
 - Provisioning is synchronous; the code comments call out BullMQ as future work.
 - `settings` is typed as `string` in the schema but provisioning/update paths may treat it as object-shaped metadata; keep docs aligned with runtime behavior until the schema is fixed.

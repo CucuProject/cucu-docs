@@ -1,5 +1,47 @@
 # Startup & Orchestration
 
+## Local Kubernetes profile — 15 September 2026
+
+The authorized local profile is now **Colima `cucu`**, not Docker Desktop:
+one ARM64 VM (6 CPUs / 10 GiB), K3s 1.35.0+k3s1 and Docker 29.5.2 through
+cri-dockerd. This supersedes earlier Desktop-only instructions for local work;
+it does not establish remote or production readiness.
+
+The `cucu-dev` namespace declares 19 long-running application Deployments and
+20 independent datastore StatefulSets: 19 Mongo instances (including the
+Holidays shared database) and one Redis. Gateway has no Mongo; Audit owns its
+central Mongo and remains event-only. Bootstrap is the twentieth image but runs
+as an explicit Job, not a resident service.
+
+Applications and databases are separate Pods at the same namespace level.
+The label `cucu.io/domain=projects` identifies both the Projects app and its Mongo;
+it does not create an intermediate Kubernetes object.
+Every app has one replica. The Colima overlay uses **Recreate**, so an update
+terminates the previous app Pod before starting its replacement. This accepts
+brief downtime and prevents overlapping replicas with the current Redis Pub/Sub
+RPC contract. Database Pod lifecycles and retained PVCs remain independent.
+Other chart overlays retain their prior RollingUpdate default.
+
+The profile keeps owner-scoped credentials, Mongo TLS, Redis mTLS/ACL,
+fail-closed Secret mount admission, namespace default-deny networking,
+restricted Pod security and resource budgets. K3s Secret encryption is enabled.
+CA recovery keys stay outside the VM; **Retain is not backup**. Frontend remains
+on the Mac; only Gateway is forwarded locally over TLS. Headlamp runs separately
+in `cucu-observe`, with read-only access. The earlier synthetic trial and its
+PVCs are preserved.
+
+The canonical backend runbook is
+[`infra/kubernetes/images/COLIMA.md`](https://github.com/CucuProject/cucu-nest/blob/jarvisbotpot/cuc-429-real-app-stack/infra/kubernetes/images/COLIMA.md).
+Build and proof commands explicitly select `colima-cucu` and its dedicated
+kubeconfig. Images are built serially from committed allowlisted sources,
+loaded once into the shared Docker/K3s image store and referenced by digest.
+No Compose reset, legacy data migration, Tilt enablement or release-to-main merge
+is part of this change.
+
+Full-program readiness remains distinct from a passing local checkpoint:
+remote deployment, backup/restore, sustained sizing and the existing upstream
+shared-library dependency still have their own gates.
+
 Cucu uses a shared bootstrap function (`createSubgraphMicroservice`) and a dependency orchestration system (`@cucu/microservices-orchestrator`) to ensure services start in the correct order and all dependencies are available.
 
 ## Shared Bootstrap: `createSubgraphMicroservice()`

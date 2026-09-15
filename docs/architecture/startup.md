@@ -26,7 +26,9 @@ The profile keeps owner-scoped credentials, Mongo TLS, Redis mTLS/ACL,
 fail-closed Secret mount admission, namespace default-deny networking,
 restricted Pod security and resource budgets. K3s Secret encryption is enabled.
 CA recovery keys stay outside the VM; **Retain is not backup**. Frontend remains
-on the Mac; only Gateway is forwarded locally over TLS. Headlamp runs separately
+on the Mac; its existing HTTP-only client/server-auth URLs still need a separate
+TLS integration check. A passing authenticated backend E2E is not a frontend UI
+validation. Only Gateway is forwarded locally over TLS. Headlamp runs separately
 in `cucu-observe`, with read-only access. The earlier synthetic trial and its
 PVCs are preserved.
 
@@ -37,6 +39,22 @@ kubeconfig. Images are built serially from committed allowlisted sources,
 loaded once into the shared Docker/K3s image store and referenced by digest.
 No Compose reset, legacy data migration, Tilt enablement or release-to-main merge
 is part of this change.
+
+The first full Colima seed exposed a transport mismatch in the default-currency
+lookup: authenticated RPC enrichment wraps primitive payloads. Bootstrap now
+sends an explicit `{ id }` object; Tenants accepts it and retains legacy direct
+string compatibility, while rejecting malformed envelopes. Currency update
+counts require a returned `defaultCurrency: EUR` postcondition, not only an
+Observable completion. The failed Job and partial tenant data are retained for
+recovery; no shared-library or access-control bypass was introduced.
+
+The local checkpoint passed with19/19 apps and20/20 datastores Ready. A real
+Projects image update completed in6.85s without replacing any database Pod/PVC.
+ACME recovery and rerun both completed without warnings/errors and preserved
+16 databases,36 collections and3,006 documents. The same totals and sentinel
+values survived a VM reboot; authenticated Commercial→Projects, anonymous/revoked
+denials and controlled dependency recovery passed again afterward. Historical
+Auth startup restarts are retained; both E2E runs had zero restart delta.
 
 Full-program readiness remains distinct from a passing local checkpoint:
 remote deployment, backup/restore, sustained sizing and the existing upstream
